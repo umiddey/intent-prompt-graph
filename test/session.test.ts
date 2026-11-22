@@ -136,7 +136,12 @@ describe("session", () => {
     dir = mkdtempSync(join(tmpdir(), "ipg-sess-"));
     file = join(dir, "sess.jsonl");
     writeFileSync(file, "");
-    config = { harnessText: [/HARNESS_NOTE/], labeler: { baseUrl: fake.url, model: "m" } };
+    config = {
+      harnessText: [/HARNESS_NOTE/],
+      labeler: { baseUrl: fake.url, model: "m" },
+      port: 4761,
+      idleExitMinutes: 15,
+    };
     clock = 0;
   });
 

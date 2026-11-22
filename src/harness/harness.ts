@@ -24,3 +24,8 @@ export interface Harness {
 
 export const harnesses = { omp } as const;
 export type HarnessId = keyof typeof harnesses;
+
+/** Own-property lookup, so ids such as "toString" are not harnesses. */
+export function harnessById(id: string): Harness | undefined {
+  return Object.hasOwn(harnesses, id) ? harnesses[id as HarnessId] : undefined;
+}

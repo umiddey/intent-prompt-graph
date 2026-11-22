@@ -10,7 +10,11 @@ import { FIXTURE, FIXTURE_ID, type Isolation, isolate } from "./support";
 
 const REF: SessionRef = { harness: "omp", key: FIXTURE_ID, file: FIXTURE, cwd: "/proj" };
 
-const cfg = (...patterns: string[]): Config => ({ harnessText: patterns.map((p) => new RegExp(p)) });
+const cfg = (...patterns: string[]): Config => ({
+  harnessText: patterns.map((p) => new RegExp(p)),
+  port: 4761,
+  idleExitMinutes: 15,
+});
 
 /** Feeds records through the OMP reader; the last version of each turn wins, in first-seen order. */
 function fold(records: unknown[], config: Config = cfg()): Turn[] {

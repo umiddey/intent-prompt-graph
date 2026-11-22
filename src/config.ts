@@ -2,6 +2,9 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+export const DEFAULT_PORT = 4761;
+export const DEFAULT_IDLE_EXIT_MINUTES = 15;
+
 export interface LabelerConfig {
   baseUrl?: string;
   model?: string;
@@ -11,6 +14,10 @@ export interface LabelerConfig {
 export interface Config {
   harnessText: RegExp[];
   labeler?: LabelerConfig;
+  /** Loopback port of the daemon. */
+  port: number;
+  /** The daemon exits after this many minutes with no open SSE client. */
+  idleExitMinutes: number;
 }
 
 export function configFile(env: NodeJS.ProcessEnv = process.env): string {
@@ -24,7 +31,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   try {
     raw = readFileSync(configFile(env), "utf8");
   } catch (err) {
-    if (err instanceof Error && "code" in err && err.code === "ENOENT") return { harnessText: [] };
+    if (err instanceof Error && "code" in err && err.code === "ENOENT") {
+      return { harnessText: [], port: DEFAULT_PORT, idleExitMinutes: DEFAULT_IDLE_EXIT_MINUTES };
+    }
     throw err;
   }
   const json: unknown = JSON.parse(raw);
@@ -34,12 +43,33 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   }
   const labelerValue = field(json, "labeler");
   const labeler = labelerValue === undefined ? undefined : parseLabeler(labelerValue);
-  return { harnessText: list.map((p) => new RegExp(p)), labeler };
+  return {
+    harnessText: list.map((p) => new RegExp(p)),
+    labeler,
+    port: parsePort(field(json, "port")),
+    idleExitMinutes: parseIdleExitMinutes(field(json, "idleExitMinutes")),
+  };
 }
 
 /** Reads one property of a JSON value; anything that is not an object has no fields. */
 function field(value: unknown, key: string): unknown {
   return typeof value === "object" && value !== null ? Reflect.get(value, key) : undefined;
+}
+
+function parsePort(value: unknown): number {
+  if (value === undefined) return DEFAULT_PORT;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > 65535) {
+    throw new Error("config.port must be an integer from 1 to 65535");
+  }
+  return value;
+}
+
+function parseIdleExitMinutes(value: unknown): number {
+  if (value === undefined) return DEFAULT_IDLE_EXIT_MINUTES;
+  if (typeof value !== "number" || !(value > 0)) {
+    throw new Error("config.idleExitMinutes must be a positive number");
+  }
+  return value;
 }
 
 function parseLabeler(value: unknown): LabelerConfig {
