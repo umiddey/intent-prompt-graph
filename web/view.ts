@@ -87,7 +87,10 @@ function ago(at: number, now: number): string {
 
 const clock = (at: number): string => new Date(at).toLocaleString();
 
+const UNSORTED = "unsorted";
+
 function titleOf(s: State, id: string | undefined): string {
+  if (id === UNSORTED) return "Unsorted turns";
   return (id === undefined ? undefined : s.intents.get(id)?.title) ?? "Untitled";
 }
 
@@ -126,6 +129,12 @@ export function derive(s: State): Derived {
     list.push(t);
     byIntent.set(id, list);
     latest = t;
+  }
+  // Nothing labelled yet (labeler off, failing or still working): show the turns instead of an empty page.
+  if (byIntent.size === 0 && unlabeled.length > 0) {
+    for (const t of unlabeled) intentOf.set(t.id, UNSORTED);
+    byIntent.set(UNSORTED, unlabeled.splice(0));
+    latest = byIntent.get(UNSORTED)?.at(-1);
   }
   const kept = s.focus !== undefined && byIntent.has(s.focus);
   const focus = kept ? s.focus : latest && intentOf.get(latest.id);
