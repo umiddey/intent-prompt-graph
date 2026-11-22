@@ -116,6 +116,8 @@ export function startDaemon(opts: { config: Config; port: number; onIdle: () => 
       if (events) return sse(req, srv, events[1] ?? "", events[2] ?? "");
       const page = /^\/s\/([^/]+)\/([^/]+)$/.exec(pathname);
       if (page) return pageFor(page[1] ?? "", page[2] ?? "");
+      const asset = /^\/_web\/([^/]+)$/.exec(pathname);
+      if (asset) return assetFor(asset[1] ?? "");
       return new Response("not found", { status: 404 });
     },
   });
@@ -142,7 +144,28 @@ async function resolveRef(harnessId: string, key: string): Promise<{ harness: Ha
 
 async function pageFor(harnessId: string, key: string): Promise<Response> {
   if (!(await resolveRef(harnessId, key))) return new Response("not found", { status: 404 });
-  return new Response(Bun.file(PAGE), { headers: { "content-type": "text/html; charset=utf-8" } });
+  const html = (await webBundle()).get("index.html");
+  if (!html) throw new Error("ipg: web bundle has no index.html");
+  return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
+}
+
+async function assetFor(name: string): Promise<Response> {
+  const file = (await webBundle()).get(name);
+  return file ? new Response(file) : new Response("not found", { status: 404 });
+}
+
+let bundle: Promise<Map<string, Blob>> | undefined;
+
+/** Bundles the page once per process: HTML, TS and CSS become files served under /_web/. */
+function webBundle(): Promise<Map<string, Blob>> {
+  bundle ??= buildPage();
+  return bundle;
+}
+
+async function buildPage(): Promise<Map<string, Blob>> {
+  const out = await Bun.build({ entrypoints: [PAGE], publicPath: "/_web/" });
+  if (!out.success) throw new AggregateError(out.logs, "ipg: web build failed");
+  return new Map(out.outputs.map((o) => [o.path.replace(/^\.\//, ""), o] as const));
 }
 
 function hostAllowed(host: string | null, port: number): boolean {
