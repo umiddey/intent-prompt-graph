@@ -87,6 +87,7 @@ function ago(at: number, now: number): string {
 
 const clock = (at: number): string => new Date(at).toLocaleString();
 
+const UNSORTED_SHOWN = 12;
 const UNSORTED = "unsorted";
 
 function titleOf(s: State, id: string | undefined): string {
@@ -159,7 +160,9 @@ function cardHtml(t: Turn, label: Label | undefined, now: number): string {
 
 /** Every node on the page with its position: the hub, the focused intent's turns, and the chips. */
 export function slotsOf(s: State, d: Derived, now: number): Slot[] {
-  const cards = (d.focus === undefined ? undefined : d.byIntent.get(d.focus)) ?? [];
+  const all = (d.focus === undefined ? undefined : d.byIntent.get(d.focus)) ?? [];
+  // Without a labeler every turn lands in one bucket; 150 cards in one ring cannot be read, so draw the newest few.
+  const cards = d.focus === UNSORTED ? all.slice(-UNSORTED_SHOWN) : all;
   const n = cards.length;
   const order = new Map(s.turns.map((t, i) => [t.id, i] as const));
   const sel = selected(s, d)?.id;
@@ -174,7 +177,7 @@ export function slotsOf(s: State, d: Derived, now: number): Slot[] {
       html:
         d.focus === undefined
           ? `<div class="title">Waiting for turns</div><div class="meta">0 turns</div>`
-          : `<div class="title">${esc(titleOf(s, d.focus))}</div><div class="meta">${n} turns · ${last ? esc(ago(last.at, now)) : "no activity"}</div>`,
+          : `<div class="title">${esc(titleOf(s, d.focus))}</div><div class="meta">${all.length > n ? `newest ${n} of ${all.length}` : `${n}`} turns · ${last ? esc(ago(last.at, now)) : "no activity"}</div>`,
       data: {},
       fade: 1,
       card: false,
@@ -246,12 +249,19 @@ export function slotsOf(s: State, d: Derived, now: number): Slot[] {
 function sidebarHtml(s: State, d: Derived): string {
   const rows = [...s.intents.values()].map((i) => ({ i, turns: d.byIntent.get(i.id) ?? [] }));
   rows.sort((a, b) => (b.turns.at(-1)?.at ?? b.i.createdAt) - (a.turns.at(-1)?.at ?? a.i.createdAt));
-  return rows
+  const unsorted = d.byIntent.get(UNSORTED);
+  const head = unsorted
+    ? `<li data-intent="${UNSORTED}" class="${UNSORTED === d.focus ? "on" : ""}"><span>Unsorted turns</span><span>${unsorted.length}</span></li>`
+    : "";
+  return (
+    head +
+    rows
     .map(
       ({ i, turns }) =>
         `<li data-intent="${esc(i.id)}" class="${i.id === d.focus ? "on" : ""}"><span>${esc(i.title)}</span><span>${turns.length}</span></li>`,
     )
-    .join("");
+      .join("")
+  );
 }
 
 function panelHtml(s: State, d: Derived, now: number): string {
@@ -315,10 +325,16 @@ export function paint(s: State, d: Derived, els: Els, now: number): void {
   els.panel.innerHTML = panelHtml(s, d, now);
 }
 
+function labelerNotice(error: string): string {
+  return error.startsWith("labeler not configured")
+    ? "No labeler configured, so turns are not grouped into intents. Set labeler.baseUrl and labeler.model in ~/.config/intent-prompt-graph/config.json."
+    : `Labeler error: ${error}`;
+}
+
 /** Banner, toast and the Follow button. */
 export function chrome(s: State, d: Derived, els: Els): void {
   els.banner.hidden = s.connected && !s.labelerError;
-  els.banner.textContent = s.connected ? `Labeler error: ${s.labelerError ?? ""}` : "Connection lost. Reconnecting…";
+  els.banner.textContent = s.connected ? labelerNotice(s.labelerError ?? "") : "Connection lost. Reconnecting…";
   const newest = s.turns.at(-1);
   const unseen = !s.follow && newest !== undefined && newest.id !== s.seen;
   els.toast.hidden = !unseen;
