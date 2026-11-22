@@ -11,5 +11,5 @@
     "noEmit": true,
     "skipLibCheck": true
   },
-  "include": ["src", "test", "web"]
+  "include": ["src", "test", "web", "integrations/omp"]
 }
