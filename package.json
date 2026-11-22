@@ -1,9 +1,42 @@
 {
   "name": "intent-prompt-graph",
   "version": "0.1.0",
-  "private": true,
+  "description": "A live browser graph of a coding-agent conversation, grouped by intent. Standalone `ipg` CLI plus an OMP plugin that adds /graph.",
+  "keywords": [
+    "ai-agents",
+    "coding-agents",
+    "omp",
+    "bun",
+    "cli",
+    "graph"
+  ],
+  "homepage": "https://github.com/umiddey/intent-prompt-graph#readme",
+  "bugs": "https://github.com/umiddey/intent-prompt-graph/issues",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/umiddey/intent-prompt-graph.git"
+  },
+  "engines": {
+    "bun": ">=1.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "src",
+    "web",
+    "integrations",
+    "README.md",
+    "LICENSE"
+  ],
   "bin": {
     "ipg": "src/cli.ts"
+  },
+  "omp": {
+    "extensions": [
+      "./integrations/omp/intent-graph.ts"
+    ]
   },
   "scripts": {
     "test": "bun test",

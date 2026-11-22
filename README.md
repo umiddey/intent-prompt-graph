@@ -4,30 +4,35 @@ A local tool that shows the intent graph of a coding-agent session: which topics
 the conversation moved through, and which turns belong to each topic. It runs a
 loopback-only daemon and serves the graph in the browser.
 
+## What it is
+
+Two parts in one npm package:
+
+- `ipg`: a standalone CLI and local daemon (needs [Bun](https://bun.sh)). Works from any shell.
+- An OMP plugin that adds the `/graph` slash command (a thin wrapper around `ipg open`).
+
 ## Install
 
-From the repo root:
+```sh
+bun add -g intent-prompt-graph     # puts `ipg` on PATH
+omp plugin install intent-prompt-graph   # adds /graph to OMP
+```
+
+From a checkout instead:
 
 ```sh
 bun install
-bun link          # puts the `ipg` command on PATH (package.json bin)
+bun link                           # `ipg` on PATH
+omp plugin link "$PWD"             # /graph in OMP
 ```
 
 ## OMP integration
 
-The OMP extension is `integrations/omp/intent-graph.ts`. It adds a `/graph`
-command that runs `ipg open --harness omp --session-file <file>` for the current
+`/graph` runs `ipg open --harness omp --session-file <file>` for the current
 session and prints the URL. It calls the `ipg` CLI on PATH and does not import
-daemon code.
-
-To load it, link the file into OMP's extensions directory:
-
-```sh
-ln -s "$PWD/integrations/omp/intent-graph.ts" ~/.omp/agent/extensions/intent-graph.ts
-```
-
-Then run `/graph` in an OMP session. A session that is not saved to disk gets a
-warning instead of a graph.
+daemon code. A session that is not saved to disk gets a warning instead of a
+graph. The plugin entry is the `omp.extensions` field of `package.json`
+(`integrations/omp/intent-graph.ts`).
 
 ## Config
 
