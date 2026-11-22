@@ -1,0 +1,8 @@
+{"type":"title","v":1,"title":"Fixture session","updatedAt":"2026-11-22T10:00:00.000Z","pad":""}
+{"type":"session","version":3,"id":"0000aaaa-0000-7000-8000-000000000001","timestamp":"2026-11-22T10:00:00.000Z","cwd":"/proj"}
+{"type":"message","id":"e0000001","parentId":null,"timestamp":"2026-11-22T10:00:01.000Z","message":{"role":"user","content":"Why does the build fail?","timestamp":1795341601000}}
+{"type":"message","id":"e0000002","parentId":"e0000001","timestamp":"2026-11-22T10:00:02.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Let me check."},{"type":"toolCall","id":"tc1","name":"bash","arguments":{"i":"Run the build","command":"bun run build"}}],"stopReason":"toolUse","timestamp":1795341602000}}
+{"type":"message","id":"e0000003","parentId":"e0000002","timestamp":"2026-11-22T10:00:03.000Z","message":{"role":"toolResult","toolCallId":"tc1","toolName":"bash","content":[{"type":"text","text":"fixture tool output: error TS2307"}],"isError":false,"timestamp":1795341603000}}
+{"type":"message","id":"e0000004","parentId":"e0000003","timestamp":"2026-11-22T10:00:04.000Z","message":{"role":"assistant","content":[{"type":"text","text":"The import path is wrong."}],"stopReason":"stop","timestamp":1795341604000}}
+{"type":"message","id":"e0000005","parentId":"e0000004","timestamp":"2026-11-22T10:00:05.000Z","message":{"role":"user","content":"Fix it.","timestamp":1795341605000}}
+{"type":"message","id":"e0000006","parentId":"e0000005","timestamp":"2026-11-22T10:00:06.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Fixed."}],"stopReason":"stop","timestamp":1795341606000}}
