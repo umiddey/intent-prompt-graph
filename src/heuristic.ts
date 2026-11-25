@@ -8,6 +8,10 @@ const SIDE_Q_RE = /^(what is|wgat is|whats|what's|why are|why did|how does|can y
 const APPROVED_RE = /\b(ready to sign off|signed off|approved|looks good|lgtm|done,\s*committed|passes locally|merged|correct\.|clean and ready)\b/i;
 const OPTION_LINE_RE = /^\s*(?:\*\*?)?(?:Option\s*)?(\d+)[.)]\s*(?:\*\*?)?([^\n]{6,90})/gm;
 
+/** Most nodes a heuristic graph may hold; beyond it, older steps collapse into one summary node. */
+export const MAX_HEURISTIC_NODES = 40;
+const EARLIER_NODE_ID = "earlier";
+
 interface Exchange {
   owner?: Turn;
   agents: Turn[];
@@ -126,9 +130,67 @@ function extractOptions(text: string): string[] {
 }
 
 /**
+ * Caps a heuristic graph at MAX_HEURISTIC_NODES: keeps the goal, one summary node standing in for
+ * the older steps, and the most recent nodes. Edges into a kept node from the goal or from a
+ * collapsed node are re-attached to the summary node, so the result reads goal -> summary -> recent
+ * steps and every kept node stays reachable from the goal. Graphs at or under the cap are returned as is.
+ *
+ * Args:
+ *     nodes (GraphNode[]): Nodes in creation order, goal first.
+ *     edges (GraphEdge[]): Edges pointing from earlier to later nodes, ids "e1"...
+ *
+ * Returns:
+ *     { nodes: GraphNode[]; edges: GraphEdge[] }: Graph with at most MAX_HEURISTIC_NODES nodes.
+ */
+function capGraph(nodes: GraphNode[], edges: GraphEdge[]): { nodes: GraphNode[]; edges: GraphEdge[] } {
+  const goal = nodes[0];
+  if (!goal || nodes.length <= MAX_HEURISTIC_NODES) return { nodes, edges };
+
+  const firstKept = nodes.length - (MAX_HEURISTIC_NODES - 2);
+  const collapsed = nodes.slice(1, firstKept);
+  const recent = nodes.slice(firstKept);
+  const collapsedIds = new Set<string>();
+  const turnIds = new Set<string>();
+  let at = 0;
+  for (const n of collapsed) {
+    collapsedIds.add(n.id);
+    for (const tid of n.turnIds) turnIds.add(tid);
+    at = Math.max(at, n.at);
+  }
+
+  const count = collapsed.length;
+  const summary: GraphNode = {
+    id: EARLIER_NODE_ID,
+    kind: "loop",
+    badge: `EARLIER · ${count} STEPS`,
+    title: `${count} earlier steps collapsed`,
+    desc: `${count} older steps are hidden in no-AI mode.`,
+    rationaleLabel: "Why collapsed",
+    rationale: `No-AI mode shows the session goal and only the latest ${recent.length} steps. Configure a labeler to get the full decision graph.`,
+    turnIds: [...turnIds],
+    at,
+    rounds: count,
+  };
+
+  const kept: GraphEdge[] = [{ id: "e0", from: goal.id, to: summary.id, kind: "loop", label: `${count} earlier` }];
+  const reattached = new Set<string>();
+  for (const e of edges) {
+    if (collapsedIds.has(e.to)) continue;
+    if (e.from !== goal.id && !collapsedIds.has(e.from)) {
+      kept.push(e);
+    } else if (!reattached.has(e.to)) {
+      reattached.add(e.to);
+      kept.push({ ...e, from: summary.id });
+    }
+  }
+
+  return { nodes: [goal, summary, ...recent], edges: kept };
+}
+
+/**
  * Builds a deterministic Decision & Path Graph DAG directly from raw turns without needing an LLM.
  * Collapses repetitive check/polling loops, branches rejections and side questions off the main spine,
- * and ensures every session is immediately readable out of the box.
+ * and caps the result at MAX_HEURISTIC_NODES so long sessions show the goal plus their latest steps.
  *
  * Args:
  *     turns (Turn[]): Ordered turns from the session transcript.
@@ -372,8 +434,7 @@ export function buildHeuristicGraph(turns: Turn[], sessionTitle?: string): Sessi
 
   return {
     title: rootTitle,
-    nodes,
-    edges,
+    ...capGraph(nodes, edges),
     mode: "heuristic",
   };
 }

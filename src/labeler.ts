@@ -28,20 +28,11 @@ export interface RedactedTurn {
 
 export interface GraphExtractInput {
   sessionTitle?: string;
+  /** Slim outline of the graph built so far; when present the model replies with a patch, not the full graph. */
   existingGraph?: {
     title: string;
-    nodes: {
-      id: string;
-      kind: NodeKind;
-      badge?: string;
-      title: string;
-      desc?: string;
-      rationaleLabel?: string;
-      rationale?: string;
-      rounds?: number;
-      turnIds: string[];
-    }[];
-    edges: { from: string; to: string; kind: EdgeKind; label?: string }[];
+    nodes: { id: string; kind: NodeKind; title: string; rounds?: number }[];
+    edges: { from: string; to: string; kind: EdgeKind }[];
   };
   turns: RedactedTurn[];
 }
@@ -63,8 +54,12 @@ Rules:
 - Merge repetitive back-and-forth checks (like "chk agn" / "chk now" or repeated CI/blocker status polls) into ONE "loop" node with all their turn refs in "turnIds" and an integer "rounds".
 - Keep the graph concise and high-signal (typically 5-18 nodes). Do not create separate nodes for routine acknowledgements.
 - Connect nodes with directed edges (from -> to) using kinds: "chosen", "rejected", "option", "decision", "loop", "side", with a short edge "label" (<= 4 words). Every non-goal node should be reachable from the goal.
-- If "existingGraph" is provided, return the COMPLETE updated graph (preserving existing node ids, descriptions, and rationales while appending/updating nodes for the new turns).
-- Every node must include: "id", "kind", "badge" (2-3 uppercase words), "title" (<= 10 words), "desc" (1-2 concise sentences), "rationaleLabel" (e.g. "Why chosen" / "Why rejected"), "rationale" (clear concrete reason), "turnIds" (array of turn refs from the input).
+- Without "existingGraph", return the complete first graph for the given turns.
+- If "existingGraph" is provided, it outlines the graph built so far (node id, kind, title, rounds; edge from, to, kind). Reply with a PATCH for the new turns, NOT the whole graph: "nodes" holds ONLY nodes that are new or changed, and "edges" holds ONLY new edges. NEVER repeat an unchanged node. Nodes you leave out are kept exactly as they are; you cannot delete a node.
+- To change an existing node, return its "id" plus ONLY the fields that change (e.g. "kind" with a matching "badge" and "rationaleLabel", or "rounds"). "turnIds" on a changed node lists only the newly added turn refs; they are added to the ones it already has.
+- New nodes need ids not used in "existingGraph". New edges may connect new and existing node ids. To change the kind or label of an existing edge, return it again with the same "from" and "to".
+- An empty "nodes" array is valid when the new turns add nothing to an existing graph.
+- Every new node must include: "id", "kind", "badge" (2-3 uppercase words), "title" (<= 10 words), "desc" (1-2 concise sentences), "rationaleLabel" (e.g. "Why chosen" / "Why rejected"), "rationale" (clear concrete reason), "turnIds" (array of turn refs from the input).
 
 Reply with raw JSON only (no markdown fences, no commentary before or after):
 {"title":"...","nodes":[...],"edges":[{"from":"...","to":"...","kind":"...","label":"..."}]}`;
@@ -169,36 +164,128 @@ function parseJson(text: string): unknown {
   }
 }
 
-function nonEmptyString(obj: Record<string, unknown>, key: string, max: number, fallback?: string): string {
+function optionalString(obj: Record<string, unknown>, key: string, max: number): string | undefined {
   const v = obj[key];
-  if (typeof v === "string" && v.trim()) return v.trim().slice(0, max);
-  if (fallback !== undefined) return fallback;
-  throw bad(`missing or empty string "${key}"`);
+  return typeof v === "string" && v.trim() ? v.trim().slice(0, max) : undefined;
+}
+
+function nonEmptyString(obj: Record<string, unknown>, key: string, max: number, fallback?: string): string {
+  const v = optionalString(obj, key, max) ?? fallback;
+  if (v === undefined) throw bad(`missing or empty string "${key}"`);
+  return v;
+}
+
+function nodeKind(rec: Record<string, unknown>, id: string): NodeKind {
+  const kind = NODE_KINDS.find((k) => k === rec.kind);
+  if (!kind) throw bad(`invalid node kind for ${id}`);
+  return kind;
+}
+
+function replyTurnIds(rec: Record<string, unknown>): string[] {
+  const raw: unknown[] = Array.isArray(rec.turnIds) ? rec.turnIds : [];
+  return raw.filter((x): x is string => typeof x === "string" && x.trim().length > 0);
+}
+
+function replyRounds(rec: Record<string, unknown>): number | undefined {
+  return typeof rec.rounds === "number" && Number.isInteger(rec.rounds) && rec.rounds > 1 ? rec.rounds : undefined;
+}
+
+/** Latest known timestamp among turnIds, never lower than floor. */
+function latestAt(turnIds: readonly string[], turnTimestamps: ReadonlyMap<string, number>, floor: number): number {
+  let at = floor;
+  for (const tid of turnIds) {
+    const ts = turnTimestamps.get(tid);
+    if (ts !== undefined && ts > at) at = ts;
+  }
+  return at;
 }
 
 /**
- * Validates and normalizes the LLM's Decision & Path Graph JSON reply.
- * Throws on structural errors so callers never commit partial or corrupt graphs.
+ * Builds a node the graph does not have yet; every required field must be present or defaultable.
+ *
+ * Args:
+ *     id (string): Validated node id.
+ *     rec (Record<string, unknown>): Raw node object from the reply.
+ *     turnTimestamps (ReadonlyMap<string, number>): Known turn timestamps keyed by turn id.
+ *
+ * Returns:
+ *     GraphNode: Validated new node.
+ */
+function newNode(id: string, rec: Record<string, unknown>, turnTimestamps: ReadonlyMap<string, number>): GraphNode {
+  const kind = nodeKind(rec, id);
+  const title = nonEmptyString(rec, "title", TITLE_CHARS);
+  const desc = nonEmptyString(rec, "desc", DESC_CHARS, title);
+  const badge = nonEmptyString(rec, "badge", BADGE_CHARS, kind.toUpperCase());
+  const rationaleLabel = nonEmptyString(rec, "rationaleLabel", 48, kind === "rejected" ? "Why rejected" : "Why chosen");
+  const rationale = nonEmptyString(rec, "rationale", RATIONALE_CHARS, desc);
+  const turnIds = replyTurnIds(rec);
+  const node: GraphNode = { id, kind, badge, title, desc, rationaleLabel, rationale, turnIds, at: latestAt(turnIds, turnTimestamps, 0) };
+  const rounds = replyRounds(rec);
+  if (rounds !== undefined) node.rounds = rounds;
+  return node;
+}
+
+/**
+ * Applies a partial reply node to a node the graph already has. Omitted fields keep the old value,
+ * turnIds are unioned (old order first) and `at` never moves backwards.
+ *
+ * Args:
+ *     old (GraphNode): Node from the existing graph (not mutated).
+ *     rec (Record<string, unknown>): Raw node object from the reply.
+ *     turnTimestamps (ReadonlyMap<string, number>): Known turn timestamps keyed by turn id.
+ *
+ * Returns:
+ *     GraphNode: Updated copy of the node.
+ */
+function updatedNode(old: GraphNode, rec: Record<string, unknown>, turnTimestamps: ReadonlyMap<string, number>): GraphNode {
+  const turnIds = [...new Set([...old.turnIds, ...replyTurnIds(rec)])];
+  const node: GraphNode = {
+    id: old.id,
+    kind: rec.kind === undefined ? old.kind : nodeKind(rec, old.id),
+    badge: optionalString(rec, "badge", BADGE_CHARS) ?? old.badge,
+    title: optionalString(rec, "title", TITLE_CHARS) ?? old.title,
+    desc: optionalString(rec, "desc", DESC_CHARS) ?? old.desc,
+    rationaleLabel: optionalString(rec, "rationaleLabel", 48) ?? old.rationaleLabel,
+    rationale: optionalString(rec, "rationale", RATIONALE_CHARS) ?? old.rationale,
+    turnIds,
+    at: latestAt(turnIds, turnTimestamps, old.at),
+  };
+  const rounds = replyRounds(rec) ?? old.rounds;
+  if (rounds !== undefined) node.rounds = rounds;
+  return node;
+}
+
+/**
+ * Validates the LLM's Decision & Path Graph JSON reply and merges it into the existing graph.
+ * Without an existing graph the reply is the complete first graph. With one, the reply is a patch:
+ * its nodes are added or partially update a node with the same id, its edges are added or replace
+ * the kind/label of the existing edge with the same from+to. The reply can never delete anything.
+ * Node errors throw so callers never commit corrupt graphs; an unusable edge is dropped on its own.
  *
  * Args:
  *     raw (string): Raw assistant message content (may be wrapped in a markdown code fence).
  *     turnTimestamps (ReadonlyMap<string, number>): Known turn timestamps keyed by turn id.
+ *     existing (SessionGraph | undefined): Graph the reply patches (not mutated); omit for a first graph.
  *
  * Returns:
- *     SessionGraph: Validated SessionGraph in "llm" mode.
+ *     SessionGraph: Validated, merged SessionGraph in "llm" mode.
  */
-export function parseGraphOutput(raw: string, turnTimestamps: ReadonlyMap<string, number>): SessionGraph {
+export function parseGraphOutput(raw: string, turnTimestamps: ReadonlyMap<string, number>, existing?: SessionGraph): SessionGraph {
   const text = raw.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
   const json = parseJson(text);
   if (typeof json !== "object" || json === null) throw bad("root is not an object");
   const root = json as Record<string, unknown>;
 
-  if (!Array.isArray(root.nodes) || root.nodes.length === 0) throw bad("nodes must be a non-empty array");
+  if (!Array.isArray(root.nodes)) throw bad(existing ? "nodes must be an array" : "nodes must be a non-empty array");
+  if (!existing && root.nodes.length === 0) throw bad("nodes must be a non-empty array");
   const rawEdges: unknown[] = Array.isArray(root.edges) ? root.edges : [];
 
-  const title = nonEmptyString(root, "title", TITLE_CHARS, "Session Decision Graph");
+  const title = optionalString(root, "title", TITLE_CHARS) ?? existing?.title ?? "Session Decision Graph";
+
+  // Insertion-ordered: existing nodes keep their position, new nodes are appended.
+  const byId = new Map<string, GraphNode>();
+  for (const n of existing?.nodes ?? []) byId.set(n.id, n);
   const seenIds = new Set<string>();
-  const nodes: GraphNode[] = [];
 
   for (const item of root.nodes) {
     if (typeof item !== "object" || item === null) throw bad("node is not an object");
@@ -206,48 +293,52 @@ export function parseGraphOutput(raw: string, turnTimestamps: ReadonlyMap<string
     const id = nonEmptyString(rec, "id", 48);
     if (seenIds.has(id)) throw bad(`duplicate node id ${id}`);
     seenIds.add(id);
-
-    const kind = NODE_KINDS.find((k) => k === rec.kind);
-    if (!kind) throw bad(`invalid node kind for ${id}`);
-
-    const nodeTitle = nonEmptyString(rec, "title", TITLE_CHARS);
-    const desc = nonEmptyString(rec, "desc", DESC_CHARS, nodeTitle);
-    const badge = nonEmptyString(rec, "badge", BADGE_CHARS, kind.toUpperCase());
-    const rationaleLabel = nonEmptyString(rec, "rationaleLabel", 48, kind === "rejected" ? "Why rejected" : "Why chosen");
-    const rationale = nonEmptyString(rec, "rationale", RATIONALE_CHARS, desc);
-
-    const rawTurnIds = Array.isArray(rec.turnIds) ? rec.turnIds : [];
-    const turnIds = rawTurnIds.filter((x): x is string => typeof x === "string" && x.trim().length > 0);
-    let at = 0;
-    for (const tid of turnIds) {
-      const ts = turnTimestamps.get(tid);
-      if (ts !== undefined && ts > at) at = ts;
-    }
-
-    const rounds = typeof rec.rounds === "number" && Number.isInteger(rec.rounds) && rec.rounds > 1 ? rec.rounds : undefined;
-    const node: GraphNode = { id, kind, badge, title: nodeTitle, desc, rationaleLabel, rationale, turnIds, at };
-    if (rounds !== undefined) node.rounds = rounds;
-    nodes.push(node);
+    const old = byId.get(id);
+    byId.set(id, old ? updatedNode(old, rec, turnTimestamps) : newNode(id, rec, turnTimestamps));
   }
 
-  const edges: GraphEdge[] = [];
-  let edgeSeq = 0;
+  const edges: GraphEdge[] = existing ? [...existing.edges] : [];
+  const pairKey = (from: string, to: string) => `${from}\u0000${to}`;
+  const slotByPair = new Map<string, number>();
+  const usedEdgeIds = new Set<string>();
+  edges.forEach((e, slot) => {
+    const key = pairKey(e.from, e.to);
+    if (!slotByPair.has(key)) slotByPair.set(key, slot);
+    usedEdgeIds.add(e.id);
+  });
+
+  let edgeSeq = edges.length;
   for (const item of rawEdges) {
-    if (typeof item !== "object" || item === null) throw bad("edge is not an object");
+    if (typeof item !== "object" || item === null) continue;
     const rec = item as Record<string, unknown>;
-    const from = nonEmptyString(rec, "from", 48);
-    const to = nonEmptyString(rec, "to", 48);
-    if (!seenIds.has(from) || !seenIds.has(to)) throw bad(`edge ${from}->${to} references unknown node`);
-    if (from === to) continue;
+    const from = optionalString(rec, "from", 48);
+    const to = optionalString(rec, "to", 48);
+    if (from === undefined || to === undefined || from === to) continue;
+    if (!byId.has(from) || !byId.has(to)) continue;
     const kind = EDGE_KINDS.find((k) => k === rec.kind);
-    if (!kind) throw bad(`invalid edge kind for ${from}->${to}`);
-    const label = typeof rec.label === "string" && rec.label.trim() ? rec.label.trim().slice(0, EDGE_LABEL_CHARS) : undefined;
-    const edge: GraphEdge = { id: `e${++edgeSeq}`, from, to, kind };
+    if (!kind) continue;
+    const label = optionalString(rec, "label", EDGE_LABEL_CHARS);
+
+    const key = pairKey(from, to);
+    const slot = slotByPair.get(key);
+    let id = slot === undefined ? undefined : edges[slot]?.id;
+    if (id === undefined) {
+      do {
+        id = `e${++edgeSeq}`;
+      } while (usedEdgeIds.has(id));
+      usedEdgeIds.add(id);
+    }
+    const edge: GraphEdge = { id, from, to, kind };
     if (label !== undefined) edge.label = label;
-    edges.push(edge);
+    if (slot === undefined) {
+      slotByPair.set(key, edges.length);
+      edges.push(edge);
+    } else {
+      edges[slot] = edge;
+    }
   }
 
-  return { title, nodes, edges, mode: "llm" };
+  return { title, nodes: [...byId.values()], edges, mode: "llm" };
 }
 
 /**
@@ -275,17 +366,19 @@ function messageContent(body: unknown): unknown {
  *
  * Args:
  *     cfg (LabelerConfig): Labeler config with model and optional command override.
- *     input (GraphExtractInput): Redacted turns and optional existing graph context.
+ *     input (GraphExtractInput): Redacted turns and optional slim outline of the existing graph.
  *     turnTimestamps (ReadonlyMap<string, number>): Known turn timestamps for node ordering.
+ *     existing (SessionGraph | undefined): Graph the reply is merged into; omit for a first graph.
  *     env (NodeJS.ProcessEnv): Environment variables passed to the subprocess.
  *
  * Returns:
- *     Promise<SessionGraph>: Validated LLM-extracted Decision & Path Graph.
+ *     Promise<SessionGraph>: Validated, merged LLM-extracted Decision & Path Graph.
  */
 async function extractViaClaudeCli(
   cfg: LabelerConfig,
   input: GraphExtractInput,
   turnTimestamps: ReadonlyMap<string, number>,
+  existing: SessionGraph | undefined,
   env: NodeJS.ProcessEnv,
 ): Promise<SessionGraph> {
   if (!cfg.model) {
@@ -335,7 +428,7 @@ async function extractViaClaudeCli(
       throw new Error(`claude-cli exited ${exitCode}: ${detail}`);
     }
     if (!stdout.trim()) throw new Error("claude-cli returned empty output");
-    return parseGraphOutput(stdout, turnTimestamps);
+    return parseGraphOutput(stdout, turnTimestamps, existing);
   } finally {
     clearTimeout(timer);
   }
@@ -343,25 +436,28 @@ async function extractViaClaudeCli(
 
 /**
  * Calls the configured labeler backend (OpenAI-compatible HTTP endpoint or local Claude CLI)
- * to extract or update the Decision & Path Graph.
+ * to extract the first Decision & Path Graph, or a patch that is merged into the existing one.
  *
  * Args:
  *     cfg (LabelerConfig): Provider, endpoint/command, model, and optional apiKeyEnv.
- *     input (GraphExtractInput): Redacted turns and optional existing graph context.
+ *     input (GraphExtractInput): Redacted turns and optional slim outline of the existing graph.
  *     turnTimestamps (ReadonlyMap<string, number>): Known turn timestamps for node ordering.
+ *     existing (SessionGraph | undefined): Full graph that `input.existingGraph` outlines; the reply
+ *         is merged into it. Omit for a first graph.
  *     env (NodeJS.ProcessEnv): Environment map used to resolve apiKeyEnv or subprocess env.
  *
  * Returns:
- *     Promise<SessionGraph>: Validated LLM-extracted Decision & Path Graph.
+ *     Promise<SessionGraph>: Validated, merged LLM-extracted Decision & Path Graph.
  */
 export async function extractGraph(
   cfg: LabelerConfig,
   input: GraphExtractInput,
   turnTimestamps: ReadonlyMap<string, number>,
+  existing?: SessionGraph,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<SessionGraph> {
   if (cfg.provider === "claude-cli") {
-    return extractViaClaudeCli(cfg, input, turnTimestamps, env);
+    return extractViaClaudeCli(cfg, input, turnTimestamps, existing, env);
   }
   if (!cfg.baseUrl || !cfg.model) {
     throw new Error("labeler not configured: set labeler.baseUrl and labeler.model in config.json");
@@ -393,5 +489,5 @@ export async function extractGraph(
   }
   const content = messageContent(await res.json());
   if (typeof content !== "string") throw new Error("labeler response has no message content");
-  return parseGraphOutput(content, turnTimestamps);
+  return parseGraphOutput(content, turnTimestamps, existing);
 }

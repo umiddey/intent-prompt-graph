@@ -14,7 +14,7 @@ import {
   TRIGGER_CHARS,
   type GraphExtractInput,
 } from "../src/labeler";
-import type { Turn } from "../src/model";
+import type { SessionGraph, Turn } from "../src/model";
 import { type FakeLabeler, startFakeLabeler } from "./fake-labeler";
 
 function turn(partial: Partial<Turn> & Pick<Turn, "id" | "author" | "text">): Turn {
@@ -69,7 +69,7 @@ describe("parseGraphOutput", () => {
     expect(g.edges[0]?.label).toBe("Wastes tokens");
   });
 
-  test("rejects invalid node kind, duplicate node ids, and dangling edges", () => {
+  test("rejects invalid node kind and duplicate node ids", () => {
     expect(() =>
       parseGraphOutput(JSON.stringify({ title: "X", nodes: [{ id: "g1", kind: "bogus", title: "A" }], edges: [] }), ts),
     ).toThrow("invalid node kind");
@@ -87,17 +87,29 @@ describe("parseGraphOutput", () => {
         ts,
       ),
     ).toThrow("duplicate node id");
+  });
 
-    expect(() =>
-      parseGraphOutput(
-        JSON.stringify({
-          title: "X",
-          nodes: [{ id: "g1", kind: "goal", title: "A" }],
-          edges: [{ from: "g1", to: "missing", kind: "chosen" }],
-        }),
-        ts,
-      ),
-    ).toThrow("unknown node");
+  test("drops a bad edge and keeps the rest of the reply", () => {
+    const g = parseGraphOutput(
+      JSON.stringify({
+        title: "X",
+        nodes: [
+          { id: "g1", kind: "goal", title: "A", turnIds: ["t1"] },
+          { id: "c1", kind: "chosen", title: "B", turnIds: ["t2"] },
+        ],
+        edges: [
+          { from: "g1", to: "missing", kind: "chosen" },
+          { from: "g1", to: "c1", kind: "bogus" },
+          "not an object",
+          null,
+          { from: "g1" },
+          { from: "g1", to: "c1", kind: "chosen", label: "Picked" },
+        ],
+      }),
+      ts,
+    );
+    expect(g.nodes.map((n) => n.id)).toEqual(["g1", "c1"]);
+    expect(g.edges).toEqual([{ id: "e1", from: "g1", to: "c1", kind: "chosen", label: "Picked" }]);
   });
 
   test("rejects non-JSON and empty nodes array, and truncates long titles", () => {
@@ -114,6 +126,165 @@ describe("parseGraphOutput", () => {
     );
     expect(g.title.length).toBe(TITLE_CHARS);
     expect(g.nodes[0]?.title.length).toBe(TITLE_CHARS);
+  });
+});
+
+describe("parseGraphOutput patch merge", () => {
+  const ts = new Map([
+    ["t1", 1000],
+    ["t2", 2000],
+    ["t3", 3000],
+    ["t4", 4000],
+  ]);
+
+  function existingGraph(): SessionGraph {
+    return {
+      title: "Enforce Reuse",
+      mode: "llm",
+      nodes: [
+        {
+          id: "g1",
+          kind: "goal",
+          badge: "ROOT",
+          title: "Stop duplicate code",
+          desc: "Force reading files before planning",
+          rationaleLabel: "Problem",
+          rationale: "Agents built parallel systems",
+          turnIds: ["t1"],
+          at: 1000,
+        },
+        {
+          id: "l1",
+          kind: "loop",
+          badge: "REVIEW LOOP",
+          title: "Plan review rounds",
+          desc: "Owner re-checks the plan",
+          rationaleLabel: "Why collapsed",
+          rationale: "Same check repeated",
+          turnIds: ["t2", "t3"],
+          at: 3000,
+          rounds: 2,
+        },
+      ],
+      edges: [{ id: "e1", from: "g1", to: "l1", kind: "loop", label: "2 rounds" }],
+    };
+  }
+
+  test("keeps existing nodes the patch does not list and appends new nodes and edges", () => {
+    const existing = existingGraph();
+    const g = parseGraphOutput(
+      JSON.stringify({
+        nodes: [{ id: "c1", kind: "chosen", title: "Save-time hook", turnIds: ["t4"] }],
+        edges: [{ from: "l1", to: "c1", kind: "chosen", label: "Approved" }],
+      }),
+      ts,
+      existing,
+    );
+
+    expect(g.mode).toBe("llm");
+    expect(g.title).toBe("Enforce Reuse");
+    expect(g.nodes.map((n) => n.id)).toEqual(["g1", "l1", "c1"]);
+    expect(g.nodes[0]).toEqual(existing.nodes[0]);
+    expect(g.nodes[1]).toEqual(existing.nodes[1]);
+    expect(g.nodes[2]?.at).toBe(4000);
+    expect(g.edges).toEqual([
+      { id: "e1", from: "g1", to: "l1", kind: "loop", label: "2 rounds" },
+      { id: "e2", from: "l1", to: "c1", kind: "chosen", label: "Approved" },
+    ]);
+    // The graph passed in is not modified.
+    expect(existing).toEqual(existingGraph());
+  });
+
+  test("a partial update keeps omitted fields, unions turnIds, and never moves `at` backwards", () => {
+    const g = parseGraphOutput(
+      JSON.stringify({
+        title: "Renamed Graph",
+        nodes: [{ id: "l1", rounds: 3, turnIds: ["t3", "t4", "unknown-turn"] }],
+      }),
+      ts,
+      existingGraph(),
+    );
+
+    expect(g.title).toBe("Renamed Graph");
+    expect(g.nodes).toHaveLength(2);
+    expect(g.nodes[1]).toEqual({
+      ...existingGraph().nodes[1],
+      rounds: 3,
+      turnIds: ["t2", "t3", "t4", "unknown-turn"],
+      at: 4000,
+    });
+
+    // Old turns missing from the timestamp map cannot lower `at`; an empty title is treated as omitted.
+    const kept = parseGraphOutput(
+      JSON.stringify({ nodes: [{ id: "l1", kind: "chosen", title: "  " }] }),
+      new Map<string, number>(),
+      existingGraph(),
+    );
+    expect(kept.nodes[1]).toEqual({ ...existingGraph().nodes[1], kind: "chosen" });
+  });
+
+  test("node errors in a patch still throw", () => {
+    expect(() => parseGraphOutput(JSON.stringify({ nodes: [{ id: "l1", kind: "bogus" }] }), ts, existingGraph())).toThrow(
+      "invalid node kind",
+    );
+    expect(() => parseGraphOutput(JSON.stringify({ nodes: [{ id: "new1", kind: "chosen" }] }), ts, existingGraph())).toThrow(
+      'missing or empty string "title"',
+    );
+    expect(() =>
+      parseGraphOutput(JSON.stringify({ nodes: [{ id: "l1", rounds: 3 }, { id: "l1", rounds: 4 }] }), ts, existingGraph()),
+    ).toThrow("duplicate node id");
+    expect(() => parseGraphOutput(JSON.stringify({ title: "X" }), ts, existingGraph())).toThrow("nodes must be an array");
+  });
+
+  test("an empty patch returns the existing graph unchanged", () => {
+    expect(parseGraphOutput(JSON.stringify({ nodes: [], edges: [] }), ts, existingGraph())).toEqual(existingGraph());
+    expect(parseGraphOutput(JSON.stringify({ title: "", nodes: [] }), ts, existingGraph())).toEqual(existingGraph());
+  });
+
+  test("an empty patch may still add edges between existing nodes; bad edges are dropped", () => {
+    const g = parseGraphOutput(
+      JSON.stringify({
+        nodes: [],
+        edges: [
+          { from: "l1", to: "gone", kind: "chosen" },
+          { from: "l1", to: "g1", kind: "nope" },
+          { from: "l1", to: "g1", kind: "decision", label: "Back to goal" },
+        ],
+      }),
+      ts,
+      existingGraph(),
+    );
+    expect(g.nodes).toEqual(existingGraph().nodes);
+    expect(g.edges).toEqual([
+      { id: "e1", from: "g1", to: "l1", kind: "loop", label: "2 rounds" },
+      { id: "e2", from: "l1", to: "g1", kind: "decision", label: "Back to goal" },
+    ]);
+  });
+
+  test("an edge with the same from+to replaces kind and label; new edge ids never collide", () => {
+    const existing = existingGraph();
+    existing.edges.push({ id: "e3", from: "l1", to: "g1", kind: "side" });
+    const g = parseGraphOutput(
+      JSON.stringify({
+        nodes: [
+          { id: "c1", kind: "chosen", title: "Save-time hook", turnIds: ["t4"] },
+          { id: "s1", kind: "side", title: "Side question", turnIds: ["t4"] },
+        ],
+        edges: [
+          { from: "g1", to: "l1", kind: "chosen" },
+          { from: "l1", to: "c1", kind: "chosen" },
+          { from: "l1", to: "s1", kind: "side" },
+        ],
+      }),
+      ts,
+      existing,
+    );
+    expect(g.edges).toEqual([
+      { id: "e1", from: "g1", to: "l1", kind: "chosen" },
+      { id: "e3", from: "l1", to: "g1", kind: "side" },
+      { id: "e4", from: "l1", to: "c1", kind: "chosen" },
+      { id: "e5", from: "l1", to: "s1", kind: "side" },
+    ]);
   });
 });
 
@@ -180,6 +351,7 @@ describe("extractGraph()", () => {
       { baseUrl: fake.url, model: "test-model", apiKeyEnv: "TEST_KEY" },
       input,
       new Map([["t1", 1000]]),
+      undefined,
       { TEST_KEY: "secret-123" },
     );
 
@@ -192,12 +364,50 @@ describe("extractGraph()", () => {
   test("fails cleanly when unconfigured, missing apiKeyEnv, or non-200 HTTP", async () => {
     const input: GraphExtractInput = { turns: [] };
     await expect(extractGraph({}, input, new Map())).rejects.toThrow("labeler not configured");
-    await expect(extractGraph({ baseUrl: fake.url, model: "m", apiKeyEnv: "UNSET" }, input, new Map(), {})).rejects.toThrow(
-      "UNSET",
-    );
+    await expect(
+      extractGraph({ baseUrl: fake.url, model: "m", apiKeyEnv: "UNSET" }, input, new Map(), undefined, {}),
+    ).rejects.toThrow("UNSET");
 
     fake.status = 502;
     await expect(extractGraph({ baseUrl: fake.url, model: "m" }, input, new Map())).rejects.toThrow("HTTP 502");
+  });
+
+  test("merges a patch reply into the existing graph it is given", async () => {
+    const existing: SessionGraph = {
+      title: "Existing",
+      mode: "llm",
+      nodes: [
+        {
+          id: "g1",
+          kind: "goal",
+          badge: "GOAL",
+          title: "Root",
+          desc: "Root desc",
+          rationaleLabel: "Problem",
+          rationale: "Root why",
+          turnIds: ["t1"],
+          at: 1000,
+        },
+      ],
+      edges: [],
+    };
+    fake.respond = () =>
+      JSON.stringify({
+        nodes: [{ id: "c1", kind: "chosen", title: "Picked path", turnIds: ["t2"] }],
+        edges: [{ from: "g1", to: "c1", kind: "chosen" }],
+      });
+
+    const g = await extractGraph(
+      { baseUrl: fake.url, model: "m" },
+      { turns: [redactTurn(turn({ id: "t2", author: "owner", text: "go with it" }))] },
+      new Map([["t2", 2000]]),
+      existing,
+    );
+
+    expect(g.title).toBe("Existing");
+    expect(g.nodes.map((n) => n.id)).toEqual(["g1", "c1"]);
+    expect(g.nodes[0]).toEqual(existing.nodes[0]);
+    expect(g.edges).toEqual([{ id: "e1", from: "g1", to: "c1", kind: "chosen" }]);
   });
 });
 

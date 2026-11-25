@@ -127,6 +127,77 @@ describe("session pipeline", () => {
     expect(fake.requests.length).toBe(callsBefore);
   });
 
+  test("sends a slim existingGraph on later batches and merges the patch reply into the stored graph", async () => {
+    fake.respond = (input) =>
+      typeof input === "object" && input !== null && "existingGraph" in input
+        ? JSON.stringify({
+            nodes: [
+              { id: "g1", turnIds: ["t3"] },
+              { id: "r1", kind: "rejected", badge: "KILLED", title: "Commit-time gate", rationale: "Wastes tokens", turnIds: ["t3"] },
+            ],
+            edges: [
+              { from: "g1", to: "r1", kind: "rejected", label: "Wastes tokens" },
+              { from: "g1", to: "nowhere", kind: "chosen" },
+            ],
+          })
+        : JSON.stringify({
+            title: "LLM Decision Graph",
+            nodes: [
+              {
+                id: "g1",
+                kind: "goal",
+                badge: "GOAL",
+                title: "Enforce file reads",
+                desc: "Force reading before plan",
+                rationaleLabel: "Problem",
+                rationale: "Avoid duplicates",
+                turnIds: ["t1", "t2"],
+              },
+            ],
+            edges: [],
+          });
+
+    const config: Config = {
+      harnessText: [],
+      port: 4761,
+      idleExitMinutes: 15,
+      labeler: { baseUrl: fake.url, model: "m" },
+    };
+    const ref = await omp.locate({ sessionFile: file, cwd: "/tmp/proj" });
+    session = await openSession({ harness: omp, ref, config });
+    await waitFor(() => session?.snapshot().graph.mode === "llm", 2000);
+
+    const events: ServerEvent[] = [];
+    session.subscribe((ev) => events.push(ev));
+    appendFileSync(
+      file,
+      `${userRec("t3", "commit time wastes tokens", "2026-11-22T10:01:00.000Z")}\n${assistantRec("t4", "Dropped the commit gate.", "2026-11-22T10:01:05.000Z")}\n`,
+    );
+    await waitFor(() => events.some((e) => e.type === "graph" && e.graph.nodes.some((n) => n.id === "r1")), 2000);
+
+    // The request carries only the outline of the stored graph: no descriptions, rationales, badges, or turn ids.
+    const patchRequest = fake.requests.find((r) => JSON.stringify(r.input).includes('"existingGraph"'));
+    expect(patchRequest?.input).toMatchObject({
+      existingGraph: { title: "LLM Decision Graph", nodes: [{ id: "g1", kind: "goal", title: "Enforce file reads" }], edges: [] },
+    });
+    const sentGraph = JSON.stringify(Reflect.get(patchRequest?.input ?? {}, "existingGraph"));
+    for (const dropped of ["desc", "rationale", "rationaleLabel", "badge", "turnIds", "Avoid duplicates"]) {
+      expect(sentGraph).not.toContain(dropped);
+    }
+
+    // The merged graph keeps the old node's fields, unions its turn ids, adds the new node, and drops the dangling edge.
+    const graph = session.snapshot().graph;
+    expect(graph.title).toBe("LLM Decision Graph");
+    expect(graph.nodes.map((n) => n.id)).toEqual(["g1", "r1"]);
+    expect(graph.nodes[0]).toMatchObject({ desc: "Force reading before plan", rationale: "Avoid duplicates", turnIds: ["t1", "t2", "t3"] });
+    expect(graph.edges).toEqual([{ id: "e1", from: "g1", to: "r1", kind: "rejected", label: "Wastes tokens" }]);
+
+    // The merged graph is what gets persisted: a restart serves it straight from the store.
+    session.stop();
+    session = await openSession({ harness: omp, ref, config });
+    expect(session.snapshot().graph).toEqual(graph);
+  });
+
   test("emits labeler error on invalid LLM output while keeping heuristic graph usable", async () => {
     fake.respond = () => "not valid json";
     const config: Config = {

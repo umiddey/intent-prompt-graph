@@ -102,20 +102,16 @@ export async function openSession(opts: { harness: Harness; ref: SessionRef; con
       turns: batch.map(redactTurn),
     };
     if (store.graph) {
+      // Outline only: the reply is a patch that the labeler merges into store.graph locally.
       input.existingGraph = {
         title: store.graph.title,
         nodes: store.graph.nodes.map((n) => ({
           id: n.id,
           kind: n.kind,
-          badge: n.badge,
           title: n.title,
-          desc: n.desc,
-          rationaleLabel: n.rationaleLabel,
-          rationale: n.rationale,
           ...(n.rounds !== undefined ? { rounds: n.rounds } : {}),
-          turnIds: n.turnIds,
         })),
-        edges: store.graph.edges.map((e) => ({ from: e.from, to: e.to, kind: e.kind, label: e.label })),
+        edges: store.graph.edges.map((e) => ({ from: e.from, to: e.to, kind: e.kind })),
       };
     }
     return input;
@@ -129,7 +125,7 @@ export async function openSession(opts: { harness: Harness; ref: SessionRef; con
 
   async function extractFrom(batch: Turn[]): Promise<void> {
     if (batch.length === 0 || stopped) return;
-    const graph = await extractGraph(labelerCfg, buildInput(batch), timestampsMap());
+    const graph = await extractGraph(labelerCfg, buildInput(batch), timestampsMap(), store.graph);
     if (stopped) return;
     store.saveGraph(graph, batch.map((t) => t.id));
     setLabelerError(undefined);
