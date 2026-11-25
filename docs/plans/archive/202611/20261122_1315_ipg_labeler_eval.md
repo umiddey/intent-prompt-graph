@@ -55,6 +55,9 @@ P6 starts only after the main plan's P1–P5 are committed and the owner endpoin
 - P6 steps: sessions, gold labels, eval/run.ts, pass bar — checked: /home/ukd/projects/intent-prompt-graph/docs/phases.md:121
 
 ## Progress
-Status: open
-WAITING on owner: a labeler endpoint for P6 (P1–P5 do not need it; tests use a fake). Choose one: (a) an OpenRouter or OpenAI key, exported in the shell OMP runs from, plus a model id; (b) an Anthropic API key for `https://api.anthropic.com/v1/` (OpenAI-compatible) and a Haiku model id; (c) local `qwen-local start` when ≥ 11 GiB RAM is free (privacy and zero cost, but slow on CPU and maybe too weak; P6 will measure it) — blocked: P6 needs a real endpoint and none is configured — why you: only you hold provider keys, and the choice decides where transcript excerpts go — still true if: `! grep -q '"baseUrl"' "${XDG_CONFIG_HOME:-$HOME/.config}/intent-prompt-graph/config.json" 2>/dev/null`
+Status: cancelled
+Cancelled by owner: 2026-11-25 label you can remove from the queue it's checked already
+- 2026-11-25 queue-close: done check failed (exit 1); reopened.
 - 2026-11-22 13:25 Main: split out of the main plan so the guard lets agents work on P1-P5; plan file written by IpgPlannerP6 from the draft of IpgPlannerFixHaiku.
+- 2026-11-26 Main: labeler endpoint decided by Main, option (c) local `qwen-local start` (no key, no spend, transcripts stay on this machine); `free -g` shows 14 GiB available, above the 11 GiB it needs. If P6 measures it too weak, keys (a)/(b) go back to the owner. WAITING line removed; the plan still waits on the /graph plan. Findings: none
+- 2026-11-26 Main: owner, verbatim: "label you can remove from the queue it's checked already". Status complete; P6 is closed by the owner's check, not by a Main run. Findings: none

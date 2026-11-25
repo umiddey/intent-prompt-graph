@@ -1,0 +1,2 @@
+# Plans the owner cancelled (one line each; written by queue-close, read by queue-check/main-guard)
+- 20261122_1315_ipg_labeler_eval.md | 2026-11-25 | owner: 2026-11-25 label you can remove from the queue it's checked already | words: candidate cheapest choose chooses decisions default design.md docs endpoint eval gives gold hand-labelled intent-prompt-graph intents invariants kinds labeler labeler-eval.md measure model nothing numbers passes phases.md pick progress provider readme real runs sessions steps three turns waiting
