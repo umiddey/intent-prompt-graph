@@ -15,33 +15,39 @@
       <span id="mode-pill" class="pill">heuristic</span>
     </div>
     <div class="legend">
-      <span><i class="swatch" style="background:var(--goal)"></i>Goal</span>
-      <span><i class="swatch" style="background:var(--chosen)"></i>Chosen</span>
-      <span><i class="swatch" style="background:var(--rejected)"></i>Rejected</span>
-      <span><i class="swatch" style="background:var(--option)"></i>Not chosen</span>
-      <span><i class="swatch" style="background:var(--decision)"></i>Decision</span>
-      <span><i class="swatch" style="background:var(--loop)"></i>Loop</span>
-      <span><i class="swatch" style="background:var(--side)"></i>Side Q</span>
+      <span class="grp-chosen"><i class="swatch"></i>Goal / chosen</span>
+      <span class="grp-rejected"><i class="swatch"></i>Rejected / not chosen</span>
+      <span class="grp-other"><i class="swatch"></i>Decision / loop / side</span>
     </div>
   </header>
 
   <aside id="sidebar"></aside>
 
-  <main id="viewport">
-    <div id="banner" hidden></div>
-    <div id="world">
-      <svg id="edges"></svg>
-      <div id="nodes"></div>
+  <main id="viewport" data-view="timeline">
+    <section id="timeline">
+      <div id="tl-summary"></div>
+      <div id="tl-rows"></div>
+    </section>
+    <div id="stage">
+      <div id="world">
+        <svg id="edges"></svg>
+        <div id="nodes"></div>
+        <div id="labels"></div>
+      </div>
     </div>
+    <div id="banner" hidden></div>
     <div id="toast" hidden></div>
     <nav id="bar">
+      <button type="button" data-set-view="timeline" class="active">Timeline</button>
+      <button type="button" data-set-view="graph">Graph</button>
+      <span class="sep"></span>
       <button type="button" data-filter="all" class="active">All paths</button>
       <button type="button" data-filter="chosen">Chosen path only</button>
       <button type="button" data-filter="decisions">Decisions &amp; Rejections</button>
       <span class="sep"></span>
       <button id="follow" type="button" aria-pressed="true">Follow: on</button>
-      <button id="fit" type="button">Fit</button>
-      <button id="reset" type="button">100%</button>
+      <button id="fit" type="button" class="graph-only">Fit</button>
+      <button id="reset" type="button" class="graph-only">100%</button>
     </nav>
   </main>
 
