@@ -482,3 +482,58 @@ printf '{"title":"CLI Graph","nodes":[{"id":"g1","kind":"goal","badge":"GOAL","t
     ).rejects.toThrow("claude-cli exited 1: auth expired");
   });
 });
+
+describe("parseGraphOutput mergeInto", () => {
+  const ts = new Map([
+    ["t1", 1000],
+    ["t2", 2000],
+    ["t3", 3000],
+    ["t4", 4000],
+  ]);
+  const n = (id: string, kind: SessionGraph["nodes"][number]["kind"], turnIds: string[], at: number) => ({
+    id,
+    kind,
+    badge: "B",
+    title: id,
+    desc: id,
+    rationaleLabel: "Why",
+    rationale: id,
+    turnIds,
+    at,
+  });
+  const graph = (): SessionGraph => ({
+    title: "T",
+    mode: "llm",
+    nodes: [n("goal", "goal", ["t1"], 1000), n("fix", "chosen", ["t2"], 2000), n("q", "side", ["t3"], 3000), n("note", "side", ["t4"], 4000)],
+    edges: [
+      { id: "e1", from: "goal", to: "fix", kind: "chosen" },
+      { id: "e2", from: "fix", to: "q", kind: "side" },
+      { id: "e3", from: "q", to: "note", kind: "side" },
+      { id: "e4", from: "goal", to: "note", kind: "side" },
+    ],
+  });
+
+  test("folds nodes into the survivor: turns and edges move there, nothing is lost or duplicated", () => {
+    // note -> q -> fix is a chain; both end up in fix.
+    const g = parseGraphOutput(
+      JSON.stringify({ nodes: [{ id: "note", mergeInto: "q" }, { id: "q", mergeInto: "fix" }, { id: "fix", title: "Fix and its questions" }] }),
+      ts,
+      graph(),
+    );
+    expect(g.nodes.map((x) => x.id)).toEqual(["goal", "fix"]);
+    expect(g.nodes[1]).toMatchObject({ title: "Fix and its questions", turnIds: ["t2", "t3", "t4"], at: 4000 });
+    // e2 and e3 became self-loops and are gone; e4 now duplicates e1's pair and is dropped.
+    expect(g.edges).toEqual([{ id: "e1", from: "goal", to: "fix", kind: "chosen" }]);
+  });
+
+  test("ignores a merge that would remove the goal, points at an unknown node, or loops", () => {
+    const g = parseGraphOutput(
+      JSON.stringify({
+        nodes: [{ id: "goal", mergeInto: "fix" }, { id: "q", mergeInto: "nope" }, { id: "note", mergeInto: "note" }, { id: "ghost", mergeInto: "fix" }],
+      }),
+      ts,
+      graph(),
+    );
+    expect(g).toEqual(graph());
+  });
+});

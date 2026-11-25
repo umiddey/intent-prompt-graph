@@ -247,6 +247,13 @@ export function summarizeGraph(graph: SessionGraph): GraphSummary {
   };
 }
 
+/** Counts owner rejections and merely unpicked options apart, e.g. "4 rejected, 18 not chosen". */
+function notTakenLabel(nodes: readonly GraphNode[]): string {
+  const rejected = nodes.filter((n) => n.kind === "rejected").length;
+  const options = nodes.length - rejected;
+  return [rejected > 0 ? `${rejected} rejected` : "", options > 0 ? `${options} not chosen` : ""].filter(Boolean).join(", ");
+}
+
 function turnsLabel(n: GraphNode): string {
   const count = n.turnIds.length;
   const time = clock(n.at);
@@ -290,7 +297,7 @@ export function paintSidebar(s: State, els: Els): void {
   const pills = [
     `${turnCount} turns → ${nodeCount} nodes`,
     sum.decisionsCount > 0 ? `${sum.decisionsCount} decisions` : "",
-    sum.rejected.length > 0 ? `${sum.rejected.length} ruled out` : "",
+    notTakenLabel(sum.rejected),
     sum.loopsCount > 0 ? `${sum.loopsCount} loops collapsed` : "",
   ]
     .filter(Boolean)
@@ -453,8 +460,8 @@ export function paintTimeline(s: State, els: Els): void {
     summaryLine("Goal", sum.goal?.title ?? "No goal identified yet", sum.goal) +
       summaryLine("Now", sum.now?.title ?? "Waiting for turns in this session…", sum.now) +
       summaryLine(
-        "Rejected",
-        ruledOut === 0 ? "Nothing ruled out yet" : `${ruledOut} ${ruledOut === 1 ? "path" : "paths"} ruled out · show the first`,
+        "Not taken",
+        ruledOut === 0 ? "Nothing rejected yet" : `${notTakenLabel(sum.rejected)} · show the first`,
         sum.rejected[0],
       ),
   );

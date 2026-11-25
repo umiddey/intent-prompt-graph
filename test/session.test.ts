@@ -198,6 +198,30 @@ describe("session pipeline", () => {
     expect(session.snapshot().graph).toEqual(graph);
   });
 
+  test("asks the labeler to tidy up an overgrown graph once, and stores the merged result", async () => {
+    const node = (i: number) => ({ id: `n${i}`, kind: i === 0 ? "goal" : "side", title: `Node ${i}`, turnIds: [i % 2 === 0 ? "t1" : "t2"] });
+    fake.respond = (input) =>
+      typeof input === "object" && input !== null && "consolidate" in input
+        ? JSON.stringify({ nodes: Array.from({ length: 10 }, (_, i) => ({ id: `n${i + 10}`, mergeInto: "n1" })) })
+        : JSON.stringify({ title: "Too long", nodes: Array.from({ length: 20 }, (_, i) => node(i)), edges: [{ from: "n0", to: "n1", kind: "side" }] });
+
+    const config: Config = { harnessText: [], port: 4761, idleExitMinutes: 15, labeler: { baseUrl: fake.url, model: "m" } };
+    const ref = await omp.locate({ sessionFile: file, cwd: "/tmp/proj" });
+    session = await openSession({ harness: omp, ref, config });
+    await waitFor(() => session?.snapshot().graph.nodes.length === 10, 2000);
+
+    const tidy = fake.requests.filter((r) => JSON.stringify(r.input).includes('"consolidate"'));
+    expect(tidy).toHaveLength(1);
+    // Two turns give the minimum budget of 12 nodes; the request carries no turns, only the outline.
+    expect(tidy[0]?.input).toMatchObject({ consolidate: { targetNodes: 12 }, turns: [] });
+    // Every turn still has a node after the merge.
+    expect(new Set(session.snapshot().graph.nodes.flatMap((n) => n.turnIds))).toEqual(new Set(["t1", "t2"]));
+
+    session.stop();
+    session = await openSession({ harness: omp, ref, config });
+    expect(session.snapshot().graph.nodes).toHaveLength(10);
+  });
+
   test("emits labeler error on invalid LLM output while keeping heuristic graph usable", async () => {
     fake.respond = () => "not valid json";
     const config: Config = {

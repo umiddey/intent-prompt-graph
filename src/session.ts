@@ -9,6 +9,21 @@ import { tailJsonl, type TailEvent } from "./tail";
 export const BATCH_TURNS = 16;
 export const BATCH_CHARS = 12_000;
 export const RETRY_MS = 60_000;
+/** A graph is tidied up when it has this many nodes more than its target size. */
+export const CONSOLIDATE_SLACK = 6;
+
+/**
+ * Node budget for a session: about one node per three turns, never under 12 or over 40.
+ *
+ * Args:
+ *     turnCount (number): Number of turns the graph covers.
+ *
+ * Returns:
+ *     number: Target node count.
+ */
+export function targetNodes(turnCount: number): number {
+  return Math.min(40, Math.max(12, Math.round(turnCount / 3)));
+}
 
 export type SnapshotEvent = Extract<ServerEvent, { type: "snapshot" }>;
 
@@ -43,6 +58,8 @@ export async function openSession(opts: { harness: Harness; ref: SessionRef; con
   let ready = false;
   let labelerError: string | undefined;
   let retry: Timer | undefined;
+  /** Node count at the last tidy-up attempt; 0 before the first one. */
+  let consolidatedAt = 0;
   let heuristicGraph: SessionGraph = buildHeuristicGraph([], ref.title);
 
   const emit = (ev: ServerEvent) => {
@@ -133,11 +150,36 @@ export async function openSession(opts: { harness: Harness; ref: SessionRef; con
     return extractFrom(nextBatch());
   }
 
+  /**
+   * Asks the labeler to fold nodes together when the graph has outgrown its budget. Runs again only
+   * after the graph has grown by another CONSOLIDATE_SLACK nodes, so a reply that merges too little
+   * is not retried on every turn. A failed tidy-up keeps the graph as it is.
+   */
+  async function consolidate(): Promise<void> {
+    const before = store.graph;
+    if (!before || stopped) return;
+    const target = targetNodes(store.processedTurnIds.size);
+    if (before.nodes.length < Math.max(target, consolidatedAt) + CONSOLIDATE_SLACK) return;
+    consolidatedAt = before.nodes.length;
+    let graph: SessionGraph;
+    try {
+      const input: GraphExtractInput = { ...buildInput([]), consolidate: { targetNodes: target } };
+      graph = await extractGraph(labelerCfg, input, timestampsMap(), before);
+    } catch {
+      return;
+    }
+    if (stopped || graph.nodes.length >= before.nodes.length) return;
+    consolidatedAt = graph.nodes.length;
+    store.saveGraph(graph, []);
+    emit({ type: "graph", graph });
+  }
+
   async function drain(): Promise<void> {
     if (!llmEnabled || busy || stopped) return;
     busy = true;
     try {
       await extractFrom(nextBatch());
+      await consolidate();
     } catch (err) {
       if (stopped) return;
       setLabelerError(err instanceof Error ? err.message : String(err));

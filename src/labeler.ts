@@ -34,6 +34,8 @@ export interface GraphExtractInput {
     nodes: { id: string; kind: NodeKind; title: string; rounds?: number }[];
     edges: { from: string; to: string; kind: EdgeKind }[];
   };
+  /** Present on a tidy-up request: no new turns, the reply only merges nodes to reach about this many. */
+  consolidate?: { targetNodes: number };
   turns: RedactedTurn[];
 }
 
@@ -46,16 +48,21 @@ Your goal is to help the human owner understand the entire session in 5 seconds:
 4. What decisions, pivots, constraints, or course corrections happened ("decision")
 5. What final paths, architectures, or fixes were chosen/verified ("chosen")
 6. Repetitive check/review/polling loops collapsed into a single node ("loop", with "rounds")
-7. Tangential clarifying questions branched off the main spine ("side")
+7. A tangent that left the main line of work for several turns ("side")
 
 Rules:
 - Synthesize crisp, specific titles (<= 8 words). NEVER copy filler openers like "You're right", "Okay", "Not quite", or raw file paths as titles.
 - When the owner rejects or pushes back on an agent proposal, mark the AGENT's rejected proposal as "rejected" (with the owner's objection as "rationale") and branch the owner's new direction as "decision" or "chosen".
+- "rejected" needs the owner saying no. An alternative that was merely not picked is "option". "decision" needs someone deciding something: never use it for a question, a fact, a status report or a caveat.
+- Fewer nodes is better. A node is one step that changed where the session went: a direction the owner set, a proposal that was rejected, a result that shipped or was verified. These do NOT get a node of their own; fold them into the "desc" of the node they belong to: a question the agent simply answered, a caveat, a warning, a next-step note, a side effect, each item of a list of options or steps.
 - Merge repetitive back-and-forth checks (like "chk agn" / "chk now" or repeated CI/blocker status polls) into ONE "loop" node with all their turn refs in "turnIds" and an integer "rounds".
 - Keep the graph concise and high-signal (typically 5-18 nodes). Do not create separate nodes for routine acknowledgements.
 - Connect nodes with directed edges (from -> to) using kinds: "chosen", "rejected", "option", "decision", "loop", "side", with a short edge "label" (<= 4 words). Every non-goal node should be reachable from the goal.
 - Without "existingGraph", return the complete first graph for the given turns.
-- If "existingGraph" is provided, it outlines the graph built so far (node id, kind, title, rounds; edge from, to, kind). Reply with a PATCH for the new turns, NOT the whole graph: "nodes" holds ONLY nodes that are new or changed, and "edges" holds ONLY new edges. NEVER repeat an unchanged node. Nodes you leave out are kept exactly as they are; you cannot delete a node.
+- If "existingGraph" is provided, it outlines the graph built so far (node id, kind, title, rounds; edge from, to, kind). Reply with a PATCH for the new turns, NOT the whole graph: "nodes" holds ONLY nodes that are new or changed, and "edges" holds ONLY new edges. NEVER repeat an unchanged node. Nodes you leave out are kept exactly as they are.
+- In a patch, first try to extend an existing node: return its "id" with the new turn refs in "turnIds" (and a better "title" or "desc" if the step moved on). Add a new node only when the new turns start a genuinely new step. One owner message plus its reply adds at most ONE new node, plus one "rejected" node if the owner refused something. Most patches add zero or one node.
+- To fold an existing node into another, return {"id":"<node to remove>","mergeInto":"<node that absorbs it>"}. Its turn refs and edges move to the absorbing node.
+- If "consolidate" is provided there are no new turns: the graph has grown too long. Shrink it to about "consolidate.targetNodes" nodes using "mergeInto". Fold questions, caveats, notes, unpicked options and small sub-steps into the decision or result they belong to. Keep the goal, real owner rejections, and the main outcomes. You may also return an absorbing node with a new "title" and "desc" that cover what it absorbed. Return no new nodes.
 - To change an existing node, return its "id" plus ONLY the fields that change (e.g. "kind" with a matching "badge" and "rationaleLabel", or "rounds"). "turnIds" on a changed node lists only the newly added turn refs; they are added to the ones it already has.
 - New nodes need ids not used in "existingGraph". New edges may connect new and existing node ids. To change the kind or label of an existing edge, return it again with the same "from" and "to".
 - An empty "nodes" array is valid when the new turns add nothing to an existing graph.
@@ -259,7 +266,8 @@ function updatedNode(old: GraphNode, rec: Record<string, unknown>, turnTimestamp
  * Validates the LLM's Decision & Path Graph JSON reply and merges it into the existing graph.
  * Without an existing graph the reply is the complete first graph. With one, the reply is a patch:
  * its nodes are added or partially update a node with the same id, its edges are added or replace
- * the kind/label of the existing edge with the same from+to. The reply can never delete anything.
+ * the kind/label of the existing edge with the same from+to. A node entry with "mergeInto" folds an
+ * existing node into another: its turn refs and edges move there, so no turn loses its node.
  * Node errors throw so callers never commit corrupt graphs; an unusable edge is dropped on its own.
  *
  * Args:
@@ -286,6 +294,7 @@ export function parseGraphOutput(raw: string, turnTimestamps: ReadonlyMap<string
   const byId = new Map<string, GraphNode>();
   for (const n of existing?.nodes ?? []) byId.set(n.id, n);
   const seenIds = new Set<string>();
+  const mergeInto = new Map<string, string>();
 
   for (const item of root.nodes) {
     if (typeof item !== "object" || item === null) throw bad("node is not an object");
@@ -294,6 +303,11 @@ export function parseGraphOutput(raw: string, turnTimestamps: ReadonlyMap<string
     if (seenIds.has(id)) throw bad(`duplicate node id ${id}`);
     seenIds.add(id);
     const old = byId.get(id);
+    const into = optionalString(rec, "mergeInto", 48);
+    if (into !== undefined) {
+      if (old && into !== id) mergeInto.set(id, into);
+      continue;
+    }
     byId.set(id, old ? updatedNode(old, rec, turnTimestamps) : newNode(id, rec, turnTimestamps));
   }
 
@@ -338,7 +352,46 @@ export function parseGraphOutput(raw: string, turnTimestamps: ReadonlyMap<string
     }
   }
 
-  return { title, nodes: [...byId.values()], edges, mode: "llm" };
+  if (mergeInto.size === 0) return { title, nodes: [...byId.values()], edges, mode: "llm" };
+
+  // Follow merge chains (a into b, b into c) to the node that survives. A merge whose chain ends
+  // on an unknown node, loops, or would remove the goal is ignored.
+  const survivor = (id: string): string => {
+    let cur = id;
+    for (let hops = 0; hops <= mergeInto.size; hops++) {
+      const next = mergeInto.get(cur);
+      if (next === undefined) return byId.has(cur) ? cur : id;
+      cur = next;
+    }
+    return id;
+  };
+  for (const id of [...mergeInto.keys()]) {
+    if (byId.get(id)?.kind === "goal" || survivor(id) === id) mergeInto.delete(id);
+  }
+  for (const id of mergeInto.keys()) {
+    const gone = byId.get(id);
+    const keepId = survivor(id);
+    const keep = byId.get(keepId);
+    if (!gone || !keep) continue;
+    // Oldest first, so the inspector shows the absorbed turns in the order they happened.
+    const turnIds = [...new Set([...keep.turnIds, ...gone.turnIds])].sort(
+      (a, b) => (turnTimestamps.get(a) ?? Infinity) - (turnTimestamps.get(b) ?? Infinity),
+    );
+    byId.set(keepId, { ...keep, turnIds, at: Math.max(keep.at, gone.at) });
+  }
+  for (const id of mergeInto.keys()) byId.delete(id);
+
+  const merged: GraphEdge[] = [];
+  const seenPairs = new Set<string>();
+  for (const e of edges) {
+    const from = survivor(e.from);
+    const to = survivor(e.to);
+    const key = pairKey(from, to);
+    if (from === to || seenPairs.has(key)) continue;
+    seenPairs.add(key);
+    merged.push({ ...e, from, to });
+  }
+  return { title, nodes: [...byId.values()], edges: merged, mode: "llm" };
 }
 
 /**
