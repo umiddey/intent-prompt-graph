@@ -1,8 +1,8 @@
 # intent-prompt-graph
 
-A local tool that shows the intent graph of a coding-agent session: which topics
-the conversation moved through, and which turns belong to each topic. It runs a
-loopback-only daemon and serves the graph in the browser.
+A local tool that turns a coding-agent session into a live **Decision & Path Graph** (DAG): what goal started the session, what options were proposed, what paths were rejected and why, what repetitive loops happened, and what path was chosen. It runs a loopback-only daemon and serves the dark-mode graph in the browser.
+
+Works out of the box with a deterministic heuristic graph builder (no API key required), and automatically upgrades to richer LLM-extracted decision graphs when `labeler` is configured.
 
 ## What it is
 

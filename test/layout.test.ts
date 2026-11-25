@@ -1,59 +1,85 @@
 import { describe, expect, test } from "bun:test";
-import { chipPos, clusterRadius, type Point, turnPos } from "../web/layout";
+import type { GraphEdge, GraphNode, NodeKind } from "../src/model";
+import { edgePath, layoutGraph, NODE_H, NODE_W } from "../web/layout";
 
-const CARD = { w: 220, h: 90 };
-const CHIP = { w: 200, h: 48 };
-const N_MAX = 200;
-const J_MAX = 40;
-
-/** Two same-size-class rectangles centred at a and b overlap iff both axis gaps are negative. */
-function overlaps(a: Point, aw: number, ah: number, b: Point, bw: number, bh: number): boolean {
-  return Math.abs(a.x - b.x) < (aw + bw) / 2 && Math.abs(a.y - b.y) < (ah + bh) / 2;
+function node(id: string, kind: NodeKind = "decision"): GraphNode {
+  return {
+    id,
+    kind,
+    badge: kind.toUpperCase(),
+    title: id,
+    desc: id,
+    rationaleLabel: "Why",
+    rationale: "Reason",
+    turnIds: [id],
+    at: 1000,
+  };
 }
 
-/** Distance from the origin to the nearest point of the rectangle centred at p. */
-function nearestToHub(p: Point, w: number, h: number): number {
-  const qx = Math.min(Math.max(0, p.x - w / 2), p.x + w / 2);
-  const qy = Math.min(Math.max(0, p.y - h / 2), p.y + h / 2);
-  return Math.hypot(qx, qy);
+function overlaps(a: { x: number; y: number }, b: { x: number; y: number }): boolean {
+  return Math.abs(a.x - b.x) < NODE_W && Math.abs(a.y - b.y) < NODE_H;
 }
 
-describe("turn cards", () => {
-  test("no two cards overlap for n = 1..200 turns of the focused intent", () => {
-    for (let n = 1; n <= N_MAX; n++) {
-      const p = turnPos(n);
-      for (let i = 1; i < n; i++) {
-        expect(overlaps(p, CARD.w, CARD.h, turnPos(i), CARD.w, CARD.h)).toBe(false);
+describe("layered DAG layout", () => {
+  test("never overlaps any two nodes across a branching 120-node DAG", () => {
+    const nodes: GraphNode[] = [node("n0", "goal")];
+    const edges: GraphEdge[] = [];
+    for (let i = 1; i < 120; i++) {
+      const kind: NodeKind = i % 5 === 0 ? "rejected" : i % 4 === 0 ? "side" : i % 3 === 0 ? "option" : "chosen";
+      nodes.push(node(`n${i}`, kind));
+      const parent = `n${Math.max(0, i - (i % 3 === 0 ? 2 : 1))}`;
+      edges.push({ id: `e${i}`, from: parent, to: `n${i}`, kind });
+    }
+
+    const pos = layoutGraph(nodes, edges);
+    expect(pos.size).toBe(120);
+    const pts = [...pos.values()];
+    for (let i = 0; i < pts.length; i++) {
+      for (let j = i + 1; j < pts.length; j++) {
+        expect(overlaps(pts[i]!, pts[j]!)).toBe(false);
       }
     }
   });
 
-  test("placing turn n+1 leaves the positions of turns 1..n unchanged", () => {
-    for (let n = 1; n < N_MAX; n++) {
-      for (let i = 1; i <= n; i++) {
-        expect(turnPos(i)).toEqual(turnPos(i));
-      }
-    }
-  });
-});
+  test("places forward transitions left-to-right and keeps main spine above rejected/option branches", () => {
+    const nodes = [node("g1", "goal"), node("opt", "option"), node("rej", "rejected"), node("win", "chosen")];
+    const edges: GraphEdge[] = [
+      { id: "e1", from: "g1", to: "opt", kind: "option" },
+      { id: "e2", from: "g1", to: "rej", kind: "rejected" },
+      { id: "e3", from: "g1", to: "win", kind: "chosen" },
+    ];
+    const pos = layoutGraph(nodes, edges);
+    const pGoal = pos.get("g1")!;
+    const pWin = pos.get("win")!;
+    const pOpt = pos.get("opt")!;
+    const pRej = pos.get("rej")!;
 
-describe("intent chips", () => {
-  test("no two chips overlap for n = 1..200 and j = 1..40", () => {
-    for (let n = 1; n <= N_MAX; n++) {
-      for (let j = 1; j <= J_MAX; j++) {
-        const p = chipPos(n, j);
-        for (let k = 1; k < j; k++) {
-          expect(overlaps(p, CHIP.w, CHIP.h, chipPos(n, k), CHIP.w, CHIP.h)).toBe(false);
-        }
-      }
-    }
+    expect(pWin.x).toBeGreaterThan(pGoal.x);
+    expect(pWin.y).toBeLessThan(pOpt.y);
+    expect(pOpt.y).toBeLessThan(pRej.y);
   });
 
-  test("every chip stays outside the focused cluster's bounding radius Rcl(n)", () => {
-    for (let n = 1; n <= N_MAX; n++) {
-      for (let j = 1; j <= J_MAX; j++) {
-        expect(nearestToHub(chipPos(n, j), CHIP.w, CHIP.h)).toBeGreaterThanOrEqual(clusterRadius(n));
-      }
-    }
+  test("places side questions in the same column below their parent and computes vertical edge paths", () => {
+    const nodes = [node("d1", "decision"), node("s1", "side")];
+    const edges: GraphEdge[] = [{ id: "e1", from: "d1", to: "s1", kind: "side" }];
+    const pos = layoutGraph(nodes, edges);
+    const pParent = pos.get("d1")!;
+    const pSide = pos.get("s1")!;
+
+    expect(pSide.x).toBe(pParent.x);
+    expect(pSide.y).toBeGreaterThan(pParent.y);
+    const geom = edgePath(pParent, pSide);
+    expect(geom.d).toContain("M ");
+    expect(geom.ly).toBeGreaterThan(pParent.y);
+  });
+
+  test("handles cyclic edges without infinite loops", () => {
+    const nodes = [node("a", "decision"), node("b", "decision")];
+    const edges: GraphEdge[] = [
+      { id: "e1", from: "a", to: "b", kind: "decision" },
+      { id: "e2", from: "b", to: "a", kind: "decision" },
+    ];
+    const pos = layoutGraph(nodes, edges);
+    expect(pos.size).toBe(2);
   });
 });

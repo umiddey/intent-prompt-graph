@@ -5,10 +5,30 @@ import { join } from "node:path";
 export const DEFAULT_PORT = 4761;
 export const DEFAULT_IDLE_EXIT_MINUTES = 15;
 
+export type LabelerProvider = "openai" | "claude-cli";
+
 export interface LabelerConfig {
+  provider?: LabelerProvider;
   baseUrl?: string;
   model?: string;
   apiKeyEnv?: string;
+  /** Optional binary/path override when provider is "claude-cli" (defaults to "claude"). */
+  command?: string;
+}
+
+/**
+ * Checks whether a labeler configuration has the required fields for its provider.
+ *
+ * Args:
+ *     cfg (LabelerConfig | undefined): Labeler section from config.json.
+ *
+ * Returns:
+ *     boolean: True when the configured provider has enough information to run.
+ */
+export function isLabelerConfigured(cfg: LabelerConfig | undefined): boolean {
+  if (!cfg?.model) return false;
+  if (cfg.provider === "claude-cli") return true;
+  return Boolean(cfg.baseUrl);
 }
 
 export interface Config {
@@ -77,7 +97,14 @@ function parseLabeler(value: unknown): LabelerConfig {
     throw new Error("config.labeler must be an object");
   }
   const out: LabelerConfig = {};
-  for (const key of ["baseUrl", "model", "apiKeyEnv"] as const) {
+  const provider = field(value, "provider");
+  if (provider !== undefined) {
+    if (provider !== "openai" && provider !== "claude-cli") {
+      throw new Error('config.labeler.provider must be "openai" or "claude-cli"');
+    }
+    out.provider = provider;
+  }
+  for (const key of ["baseUrl", "model", "apiKeyEnv", "command"] as const) {
     const v = field(value, key);
     if (v === undefined) continue;
     if (typeof v !== "string") throw new Error(`config.labeler.${key} must be a string`);

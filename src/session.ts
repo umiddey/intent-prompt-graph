@@ -1,25 +1,14 @@
-import type { Config } from "./config";
+import { isLabelerConfigured, type Config } from "./config";
 import type { Harness, SessionRef } from "./harness/harness";
-import {
-  batchTurn,
-  label,
-  MAX_INTENTS_IN_PROMPT,
-  payloadText,
-  type IntentRef,
-  type LabelInput,
-  type OfferedIntent,
-  type Parsed,
-  type PriorTurn,
-} from "./labeler";
-import type { Intent, Label, ServerEvent, Turn } from "./model";
+import { buildHeuristicGraph } from "./heuristic";
+import { extractGraph, payloadText, redactTurn, type GraphExtractInput } from "./labeler";
+import type { ServerEvent, SessionGraph, Turn } from "./model";
 import { openStore } from "./store";
 import { tailJsonl, type TailEvent } from "./tail";
 
-export const BATCH_TURNS = 8;
-export const BATCH_CHARS = 6000;
+export const BATCH_TURNS = 16;
+export const BATCH_CHARS = 12_000;
 export const RETRY_MS = 60_000;
-const PRIOR_TURNS = 3;
-const CAPTIONS_PER_INTENT = 2;
 
 export type SnapshotEvent = Extract<ServerEvent, { type: "snapshot" }>;
 
@@ -31,13 +20,21 @@ export interface Session {
 }
 
 /**
- * One live session: tails the transcript, emits each turn as it changes (I1), and labels closed turns in the background.
- * The labeler never blocks turn events. A failed batch stores nothing and retries on the next turn or after RETRY_MS.
+ * Opens one live session pipeline: tails the transcript, emits each turn immediately (I1),
+ * builds an instant heuristic Decision & Path Graph, and asynchronously upgrades it via the
+ * configured LLM extractor when available.
+ *
+ * Args:
+ *     opts ({ harness: Harness; ref: SessionRef; config: Config }): Session dependencies.
+ *
+ * Returns:
+ *     Promise<Session>: Live session handle with snapshot(), subscribe(), and stop().
  */
 export async function openSession(opts: { harness: Harness; ref: SessionRef; config: Config }): Promise<Session> {
   const { harness, ref, config } = opts;
   const store = openStore(harness.id, ref.key);
   const labelerCfg = config.labeler ?? {};
+  const llmEnabled = isLabelerConfigured(config.labeler);
   const turns = new Map<string, Turn>();
   const subs = new Set<(ev: ServerEvent) => void>();
   let reader = harness.reader(ref, { config });
@@ -46,12 +43,26 @@ export async function openSession(opts: { harness: Harness; ref: SessionRef; con
   let ready = false;
   let labelerError: string | undefined;
   let retry: Timer | undefined;
+  let heuristicGraph: SessionGraph = buildHeuristicGraph([], ref.title);
 
   const emit = (ev: ServerEvent) => {
     for (const fn of subs) fn(ev);
   };
 
-  function setLabelerError(error: string | undefined) {
+  /** Returns the active graph: persisted LLM graph when available, otherwise the live heuristic graph. */
+  function currentGraph(): SessionGraph {
+    if (store.graph && store.graph.nodes.length > 0) return store.graph;
+    return heuristicGraph;
+  }
+
+  function refreshHeuristic(shouldEmit: boolean): void {
+    heuristicGraph = buildHeuristicGraph([...turns.values()], ref.title);
+    if (shouldEmit && !store.graph) {
+      emit({ type: "graph", graph: heuristicGraph });
+    }
+  }
+
+  function setLabelerError(error: string | undefined): void {
     if (error === undefined) {
       clearTimeout(retry);
       retry = undefined;
@@ -61,7 +72,7 @@ export async function openSession(opts: { harness: Harness; ref: SessionRef; con
     emit(error === undefined ? { type: "labeler" } : { type: "labeler", error });
   }
 
-  function scheduleRetry() {
+  function scheduleRetry(): void {
     clearTimeout(retry);
     retry = setTimeout(() => {
       retry = undefined;
@@ -70,135 +81,67 @@ export async function openSession(opts: { harness: Harness; ref: SessionRef; con
     retry.unref();
   }
 
-  /** The intent a turn inherits from its owner's label, if any (agent turns only). */
-  function fixedFor(turn: Turn): string | undefined {
-    if (turn.author !== "agent" || !turn.openedBy) return undefined;
-    return store.labels.get(turn.openedBy)?.intentId;
-  }
-
-  /** Closed, unlabeled turns in file order, stopping at the first open turn. Never splits an owner from its agent turn. */
+  /** Collects the next batch of closed, unprocessed turns in file order. */
   function nextBatch(): Turn[] {
     const batch: Turn[] = [];
-    const ids = new Set<string>();
     let chars = 0;
     for (const turn of turns.values()) {
       if (turn.open) break;
-      if (store.labels.has(turn.id)) continue;
-      if (turn.author === "agent" && turn.openedBy !== undefined && ids.has(turn.openedBy)) break;
+      if (store.processedTurnIds.has(turn.id)) continue;
       const size = payloadText(turn).length;
       if (batch.length > 0 && (batch.length >= BATCH_TURNS || chars + size > BATCH_CHARS)) break;
       batch.push(turn);
-      ids.add(turn.id);
       chars += size;
     }
     return batch;
   }
 
-  /** Intents ranked by their most recent labeled turn, with their last captions in chronological order. */
-  function offerIntents(): OfferedIntent[] {
-    const pos = new Map<string, number>();
-    let n = 0;
-    for (const id of turns.keys()) pos.set(id, n++);
-    const groups = new Map<string, { last: number; items: { pos: number; caption: string }[] }>();
-    for (const l of store.labels.values()) {
-      const p = pos.get(l.turnId) ?? -1;
-      let g = groups.get(l.intentId);
-      if (g === undefined) {
-        g = { last: -1, items: [] };
-        groups.set(l.intentId, g);
-      }
-      g.last = Math.max(g.last, p);
-      g.items.push({ pos: p, caption: l.caption });
-    }
-    const titles = new Map(store.intents.map((i) => [i.id, i.title]));
-    return [...groups.entries()]
-      .toSorted((a, b) => b[1].last - a[1].last)
-      .slice(0, MAX_INTENTS_IN_PROMPT)
-      .map(([id, g]) => ({
-        id,
-        title: titles.get(id) ?? id,
-        captions: g.items
-          .toSorted((a, b) => a.pos - b.pos)
-          .slice(-CAPTIONS_PER_INTENT)
-          .map((x) => x.caption),
-      }));
-  }
-
-  /** The labeled turns just before the batch, oldest first. */
-  function priorTurns(first: Turn): PriorTurn[] {
-    const ids = [...turns.keys()];
-    const out: PriorTurn[] = [];
-    for (let k = ids.indexOf(first.id) - 1; k >= 0 && out.length < PRIOR_TURNS; k--) {
-      const id = ids[k];
-      if (id === undefined) continue;
-      const l = store.labels.get(id);
-      const t = turns.get(id);
-      if (!l || !t) continue;
-      out.push({ author: t.author, kind: l.kind, caption: l.caption });
-    }
-    return out.toReversed();
-  }
-
-  function buildInput(batch: Turn[]): LabelInput {
-    const first = batch[0];
-    return {
-      intents: offerIntents(),
-      before: first ? priorTurns(first) : [],
-      turns: batch.map((turn) => batchTurn(turn, fixedFor(turn))),
+  function buildInput(batch: Turn[]): GraphExtractInput {
+    const input: GraphExtractInput = {
+      sessionTitle: ref.title,
+      turns: batch.map(redactTurn),
     };
-  }
-
-  /** Stores a validated batch and emits its new intents and labels. */
-  function commit(batch: Turn[], parsed: Parsed): void {
-    const answers = new Map(parsed.answers.map((a) => [a.ref, a]));
-    const minted = new Map<string, string>();
-    const newIntents: Intent[] = [];
-    const newLabels: Label[] = [];
-    let seq = store.intents.reduce((max, i) => Math.max(max, Number(i.id.slice(1)) || 0), 0);
-
-    for (const turn of batch) {
-      const answer = answers.get(turn.id);
-      if (answer === undefined) throw new Error(`internal: no answer for turn ${turn.id}`);
-      let intentId: string;
-      const intent: IntentRef = answer.intent;
-      if ("id" in intent) {
-        intentId = intent.id;
-      } else {
-        const existing = minted.get(intent.local);
-        if (existing !== undefined) {
-          intentId = existing;
-        } else {
-          const title = parsed.newTitles.get(intent.local);
-          if (title === undefined) throw new Error(`internal: no title for intent ${intent.local}`);
-          seq += 1;
-          intentId = `i${seq}`;
-          minted.set(intent.local, intentId);
-          newIntents.push({ id: intentId, title, createdAt: turn.at });
-        }
-      }
-      newLabels.push({ turnId: turn.id, intentId, kind: answer.kind, caption: answer.caption });
+    if (store.graph) {
+      input.existingGraph = {
+        title: store.graph.title,
+        nodes: store.graph.nodes.map((n) => ({
+          id: n.id,
+          kind: n.kind,
+          badge: n.badge,
+          title: n.title,
+          desc: n.desc,
+          rationaleLabel: n.rationaleLabel,
+          rationale: n.rationale,
+          ...(n.rounds !== undefined ? { rounds: n.rounds } : {}),
+          turnIds: n.turnIds,
+        })),
+        edges: store.graph.edges.map((e) => ({ from: e.from, to: e.to, kind: e.kind, label: e.label })),
+      };
     }
-
-    store.commit(newIntents, newLabels);
-    for (const intent of newIntents) emit({ type: "intent", intent });
-    for (const l of newLabels) emit({ type: "label", label: l });
+    return input;
   }
 
-  /** Labels batches until none remain. Recursion, not a loop, so each await stays on its own call. */
-  async function labelFrom(batch: Turn[]): Promise<void> {
+  function timestampsMap(): Map<string, number> {
+    const map = new Map<string, number>();
+    for (const [id, t] of turns) map.set(id, t.at);
+    return map;
+  }
+
+  async function extractFrom(batch: Turn[]): Promise<void> {
     if (batch.length === 0 || stopped) return;
-    const parsed = await label(labelerCfg, buildInput(batch));
+    const graph = await extractGraph(labelerCfg, buildInput(batch), timestampsMap());
     if (stopped) return;
-    commit(batch, parsed);
+    store.saveGraph(graph, batch.map((t) => t.id));
     setLabelerError(undefined);
-    return labelFrom(nextBatch());
+    emit({ type: "graph", graph });
+    return extractFrom(nextBatch());
   }
 
   async function drain(): Promise<void> {
-    if (busy || stopped) return;
+    if (!llmEnabled || busy || stopped) return;
     busy = true;
     try {
-      await labelFrom(nextBatch());
+      await extractFrom(nextBatch());
     } catch (err) {
       if (stopped) return;
       setLabelerError(err instanceof Error ? err.message : String(err));
@@ -211,28 +154,33 @@ export async function openSession(opts: { harness: Harness; ref: SessionRef; con
   const onTail = (ev: TailEvent) => {
     if (stopped) return;
     if (ev.type === "reset") {
-      // The tail replays the file from byte 0 synchronously. Labeling resumes after that replay, so it does not rescan per record.
       turns.clear();
       reader = harness.reader(ref, { config });
       ready = false;
+      emit({ type: "reset" });
       setImmediate(() => {
         ready = true;
+        refreshHeuristic(true);
+        if (store.graph) emit({ type: "graph", graph: store.graph });
         void drain();
       });
-      emit({ type: "reset" });
-      for (const intent of store.intents) emit({ type: "intent", intent });
-      for (const l of store.labels.values()) emit({ type: "label", label: l });
       return;
     }
+    let changed = false;
     for (const turn of reader.push(ev.record)) {
       turns.set(turn.id, turn);
       emit({ type: "turn", turn });
+      changed = true;
     }
-    if (ready) void drain();
+    if (ready && changed) {
+      refreshHeuristic(true);
+      void drain();
+    }
   };
 
   const tail = await tailJsonl(ref.file, onTail, { follow: true });
   ready = true;
+  refreshHeuristic(false);
   void drain();
 
   return {
@@ -240,8 +188,7 @@ export async function openSession(opts: { harness: Harness; ref: SessionRef; con
       type: "snapshot",
       session: ref.key,
       turns: [...turns.values()],
-      intents: [...store.intents],
-      labels: [...store.labels.values()],
+      graph: currentGraph(),
       labelerError,
     }),
     subscribe(fn) {

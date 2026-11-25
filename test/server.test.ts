@@ -29,29 +29,24 @@ function turnsOf(input: unknown): Turn[] {
   return out;
 }
 
-let intentSeq = 0;
-
-/** Labels each batch: its first turn without an inherited intent opens a fresh intent; the rest of that batch reuse it. */
-function labelEverything(input: unknown): string {
-  let current = "";
+/** Returns a minimal valid Decision & Path Graph JSON covering every turn in the request. */
+function extractEverything(input: unknown): string {
+  const refs = turnsOf(input).map((t) => t.ref);
   return JSON.stringify({
-    turns: turnsOf(input).map((t) => {
-      const out: { ref: string; kind: string; caption: string; intent?: unknown } = {
-        ref: t.ref,
-        kind: t.author === "owner" ? "asked" : "did",
-        caption: `caption ${t.ref}`,
-      };
-      if (!t.fixed) {
-        if (current === "") {
-          intentSeq += 1;
-          current = `n${intentSeq}`;
-          out.intent = { new: current, title: "Topic" };
-        } else {
-          out.intent = current;
-        }
-      }
-      return out;
-    }),
+    title: "Test Session Graph",
+    nodes: [
+      {
+        id: "g1",
+        kind: "goal",
+        badge: "GOAL",
+        title: "Session root",
+        desc: "Covered turns",
+        rationaleLabel: "Context",
+        rationale: "Test graph",
+        turnIds: refs,
+      },
+    ],
+    edges: [],
   });
 }
 
@@ -106,7 +101,7 @@ describe("daemon", () => {
   beforeEach(() => {
     iso = isolate();
     fake = startFakeLabeler();
-    fake.respond = labelEverything;
+    fake.respond = extractEverything;
     config = {
       harnessText: [],
       port: 0,
@@ -140,7 +135,7 @@ describe("daemon", () => {
     expect(await res.json()).toEqual({ app: APP });
   });
 
-  test("the event stream opens with a snapshot, then delivers a new owner turn and its label", async () => {
+  test("the event stream opens with a snapshot, then delivers a new owner turn and an updated graph", async () => {
     daemon = startDaemon({ config, port: 0, onIdle: () => {} });
     const base = `http://127.0.0.1:${daemon.port}`;
     const stream = openStream(`${base}/api/s/omp/${FIXTURE_ID}/events`);
@@ -156,7 +151,7 @@ describe("daemon", () => {
     };
     appendFileSync(file, `${JSON.stringify(owner)}\n`);
     await waitFor(() => stream.lines.some((l) => l.includes('"type":"turn"') && l.includes('"zz000001"')), 1000);
-    await waitFor(() => stream.lines.some((l) => l.includes('"type":"label"') && l.includes('"zz000001"')), 5000);
+    await waitFor(() => stream.lines.some((l) => l.includes('"type":"graph"') && l.includes('"zz000001"')), 5000);
   });
 
   test("a request whose Host header is not loopback gets 403", async () => {

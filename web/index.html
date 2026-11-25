@@ -8,10 +8,25 @@
 </head>
 <body>
 <div id="app">
-  <aside id="sidebar">
-    <h1>Intents</h1>
-    <ul id="intents"></ul>
-  </aside>
+  <header id="topbar">
+    <div class="brand">
+      <span id="status-dot" class="dot"></span>
+      <span id="session-title">intent-prompt-graph</span>
+      <span id="mode-pill" class="pill">heuristic</span>
+    </div>
+    <div class="legend">
+      <span><i class="swatch" style="background:var(--goal)"></i>Goal</span>
+      <span><i class="swatch" style="background:var(--chosen)"></i>Chosen</span>
+      <span><i class="swatch" style="background:var(--rejected)"></i>Rejected</span>
+      <span><i class="swatch" style="background:var(--option)"></i>Not chosen</span>
+      <span><i class="swatch" style="background:var(--decision)"></i>Decision</span>
+      <span><i class="swatch" style="background:var(--loop)"></i>Loop</span>
+      <span><i class="swatch" style="background:var(--side)"></i>Side Q</span>
+    </div>
+  </header>
+
+  <aside id="sidebar"></aside>
+
   <main id="viewport">
     <div id="banner" hidden></div>
     <div id="world">
@@ -20,11 +35,16 @@
     </div>
     <div id="toast" hidden></div>
     <nav id="bar">
-      <button id="follow" type="button" aria-pressed="true">Follow latest: on</button>
+      <button type="button" data-filter="all" class="active">All paths</button>
+      <button type="button" data-filter="chosen">Chosen path only</button>
+      <button type="button" data-filter="decisions">Decisions &amp; Rejections</button>
+      <span class="sep"></span>
+      <button id="follow" type="button" aria-pressed="true">Follow: on</button>
       <button id="fit" type="button">Fit</button>
-      <button id="reset" type="button">Reset zoom</button>
+      <button id="reset" type="button">100%</button>
     </nav>
   </main>
+
   <aside id="panel"></aside>
 </div>
 <script type="module" src="./app.ts"></script>

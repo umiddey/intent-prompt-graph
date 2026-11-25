@@ -1,267 +1,274 @@
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { isLabelerConfigured } from "../src/config";
 import {
   AGENT_CHARS,
-  batchTurn,
-  CAPTION_CHARS,
+  extractGraph,
   GUEST_PLACEHOLDER,
-  label,
-  type LabelInput,
   OWNER_CHARS,
-  parseOutput,
-  payloadText,
+  parseGraphOutput,
+  redactTurn,
   TITLE_CHARS,
   TRIGGER_CHARS,
+  type GraphExtractInput,
 } from "../src/labeler";
 import type { Turn } from "../src/model";
 import { type FakeLabeler, startFakeLabeler } from "./fake-labeler";
 
-const AT = 1_700_000_000_000;
-
-function turn(over: Partial<Turn> & Pick<Turn, "id" | "author">): Turn {
-  return { at: AT, text: "", actions: [], open: false, ...over };
+function turn(partial: Partial<Turn> & Pick<Turn, "id" | "author" | "text">): Turn {
+  return { at: 1000, actions: [], open: false, ...partial };
 }
 
-const input: LabelInput = {
-  intents: [{ id: "i1", title: "Auth", captions: ["fixed login"] }],
-  before: [],
-  turns: [
-    { ref: "a", author: "owner", text: "fix login" },
-    { ref: "b", author: "agent", text: "patched" },
-  ],
-};
+describe("parseGraphOutput", () => {
+  const ts = new Map([
+    ["t1", 1000],
+    ["t2", 2000],
+    ["t3", 3000],
+  ]);
 
-function answer(turns: unknown[]): string {
-  return JSON.stringify({ turns });
-}
+  test("accepts valid graph JSON and strips markdown code fences", () => {
+    const raw = [
+      "```json",
+      JSON.stringify({
+        title: "Enforce Reuse",
+        nodes: [
+          {
+            id: "g1",
+            kind: "goal",
+            badge: "ROOT",
+            title: "Stop duplicate code",
+            desc: "Force reading files before planning",
+            rationaleLabel: "Problem",
+            rationale: "Agents built parallel systems",
+            turnIds: ["t1"],
+          },
+          {
+            id: "g2",
+            kind: "rejected",
+            badge: "KILLED",
+            title: "Commit-time gate",
+            desc: "Check at git commit",
+            rationaleLabel: "Why rejected",
+            rationale: "Wastes tokens",
+            turnIds: ["t2", "t3"],
+          },
+        ],
+        edges: [{ from: "g1", to: "g2", kind: "rejected", label: "Wastes tokens" }],
+      }),
+      "```",
+    ].join("\n");
 
-describe("parseOutput", () => {
-  test("accepts a valid reply and strips a code fence", () => {
-    const raw =
-      "```json\n" +
-      answer([
-        { ref: "a", kind: "asked", caption: "asks about login", intent: "i1" },
-        { ref: "b", kind: "did", caption: "patches login", intent: "i1" },
-      ]) +
-      "\n```";
-    const parsed = parseOutput(raw, input);
-    expect(parsed.answers).toEqual([
-      { ref: "a", intent: { id: "i1" }, kind: "asked", caption: "asks about login" },
-      { ref: "b", intent: { id: "i1" }, kind: "did", caption: "patches login" },
-    ]);
-    expect(parsed.newTitles.size).toBe(0);
+    const g = parseGraphOutput(raw, ts);
+    expect(g.mode).toBe("llm");
+    expect(g.title).toBe("Enforce Reuse");
+    expect(g.nodes).toHaveLength(2);
+    expect(g.nodes[1]?.at).toBe(3000);
+    expect(g.edges).toHaveLength(1);
+    expect(g.edges[0]?.label).toBe("Wastes tokens");
   });
 
-  test("rejects a kind the author may not use", () => {
-    const raw = answer([
-      { ref: "a", kind: "found", caption: "c", intent: "i1" },
-      { ref: "b", kind: "did", caption: "c", intent: "i1" },
-    ]);
-    expect(() => parseOutput(raw, input)).toThrow(/kind not allowed for owner turn a/);
+  test("rejects invalid node kind, duplicate node ids, and dangling edges", () => {
+    expect(() =>
+      parseGraphOutput(JSON.stringify({ title: "X", nodes: [{ id: "g1", kind: "bogus", title: "A" }], edges: [] }), ts),
+    ).toThrow("invalid node kind");
+
+    expect(() =>
+      parseGraphOutput(
+        JSON.stringify({
+          title: "X",
+          nodes: [
+            { id: "g1", kind: "goal", title: "A" },
+            { id: "g1", kind: "chosen", title: "B" },
+          ],
+          edges: [],
+        }),
+        ts,
+      ),
+    ).toThrow("duplicate node id");
+
+    expect(() =>
+      parseGraphOutput(
+        JSON.stringify({
+          title: "X",
+          nodes: [{ id: "g1", kind: "goal", title: "A" }],
+          edges: [{ from: "g1", to: "missing", kind: "chosen" }],
+        }),
+        ts,
+      ),
+    ).toThrow("unknown node");
   });
 
-  test("rejects an intent that was never offered", () => {
-    const raw = answer([
-      { ref: "a", kind: "asked", caption: "c", intent: "i7" },
-      { ref: "b", kind: "did", caption: "c", intent: "i1" },
-    ]);
-    expect(() => parseOutput(raw, input)).toThrow(/unknown intent i7 for turn a/);
-  });
+  test("rejects non-JSON and empty nodes array, and truncates long titles", () => {
+    expect(() => parseGraphOutput("not json", ts)).toThrow("not valid JSON");
+    expect(() => parseGraphOutput(JSON.stringify({ title: "X", nodes: [], edges: [] }), ts)).toThrow("non-empty array");
 
-  test("rejects a turn that was not answered", () => {
-    const raw = answer([{ ref: "a", kind: "asked", caption: "c", intent: "i1" }]);
-    expect(() => parseOutput(raw, input)).toThrow(/missing answers for b/);
-  });
-
-  test("rejects a ref answered twice", () => {
-    const raw = answer([
-      { ref: "a", kind: "asked", caption: "c", intent: "i1" },
-      { ref: "a", kind: "asked", caption: "c", intent: "i1" },
-    ]);
-    expect(() => parseOutput(raw, input)).toThrow(/ref a answered twice/);
-  });
-
-  test("rejects a ref that is not in the batch", () => {
-    const raw = answer([{ ref: "zz", kind: "asked", caption: "c", intent: "i1" }]);
-    expect(() => parseOutput(raw, input)).toThrow(/unknown ref zz/);
-  });
-
-  test("rejects an empty caption", () => {
-    const raw = answer([
-      { ref: "a", kind: "asked", caption: "   ", intent: "i1" },
-      { ref: "b", kind: "did", caption: "c", intent: "i1" },
-    ]);
-    expect(() => parseOutput(raw, input)).toThrow(/empty caption for turn a/);
-  });
-
-  test("rejects non-JSON and a missing turns array", () => {
-    expect(() => parseOutput("not json", input)).toThrow(/not valid JSON/);
-    expect(() => parseOutput(JSON.stringify({ items: [] }), input)).toThrow(/no turns array/);
-  });
-
-  test("cuts a caption to CAPTION_CHARS", () => {
-    const raw = answer([
-      { ref: "a", kind: "asked", caption: "x".repeat(300), intent: "i1" },
-      { ref: "b", kind: "did", caption: "c", intent: "i1" },
-    ]);
-    const [first] = parseOutput(raw, input).answers;
-    expect(first?.caption.length).toBe(CAPTION_CHARS);
-  });
-
-  test("declares a new intent and cuts its title to TITLE_CHARS", () => {
-    const raw = answer([
-      { ref: "a", kind: "asked", caption: "c", intent: { new: "n1", title: "t".repeat(200) } },
-      { ref: "b", kind: "did", caption: "c", intent: "i1" },
-    ]);
-    const parsed = parseOutput(raw, input);
-    expect(parsed.answers[0]?.intent).toEqual({ local: "n1" });
-    expect(parsed.newTitles.get("n1")?.length).toBe(TITLE_CHARS);
-  });
-
-  test("a later turn may reuse an nK declared earlier in the same batch", () => {
-    const raw = answer([
-      { ref: "a", kind: "asked", caption: "c", intent: { new: "n1", title: "Export" } },
-      { ref: "b", kind: "did", caption: "c", intent: "n1" },
-    ]);
-    const parsed = parseOutput(raw, input);
-    expect(parsed.answers.map((x) => x.intent)).toEqual([{ local: "n1" }, { local: "n1" }]);
-  });
-
-  test("rejects redeclaring the same nK", () => {
-    const raw = answer([
-      { ref: "a", kind: "asked", caption: "c", intent: { new: "n1", title: "A" } },
-      { ref: "b", kind: "did", caption: "c", intent: { new: "n1", title: "B" } },
-    ]);
-    expect(() => parseOutput(raw, input)).toThrow(/intent n1 declared twice/);
-  });
-
-  test("a fixed-intent turn takes its fixed id and ignores the model's intent", () => {
-    const fixed: LabelInput = {
-      intents: [{ id: "i1", title: "Auth", captions: [] }],
-      before: [],
-      turns: [
-        { ref: "a", author: "owner", text: "fix login" },
-        { ref: "b", author: "agent", text: "patched", fixedIntent: "i1" },
-      ],
-    };
-    const raw = answer([
-      { ref: "a", kind: "asked", caption: "c", intent: "i1" },
-      { ref: "b", kind: "did", caption: "c", intent: { new: "n1", title: "Something else" } },
-    ]);
-    const parsed = parseOutput(raw, fixed);
-    expect(parsed.answers[1]?.intent).toEqual({ id: "i1" });
-    expect(parsed.newTitles.size).toBe(0);
+    const g = parseGraphOutput(
+      JSON.stringify({
+        title: "A".repeat(200),
+        nodes: [{ id: "g1", kind: "goal", title: "B".repeat(200), turnIds: ["t1"] }],
+        edges: [],
+      }),
+      ts,
+    );
+    expect(g.title.length).toBe(TITLE_CHARS);
+    expect(g.nodes[0]?.title.length).toBe(TITLE_CHARS);
   });
 });
 
-describe("payload and I5 redaction", () => {
-  test("owner text is capped at the head, OWNER_CHARS", () => {
-    const t = turn({ id: "a", author: "owner", text: "H".repeat(2000) });
-    expect(payloadText(t)).toBe("H".repeat(OWNER_CHARS));
-    expect(batchTurn(t).text).toBe("H".repeat(OWNER_CHARS));
-  });
+describe("redactTurn and I5 privacy", () => {
+  test("caps owner text at head, agent text at tail, redacts guest text, and omits agent trigger text", () => {
+    const owner = redactTurn(turn({ id: "o1", author: "owner", text: "A".repeat(OWNER_CHARS + 50) }));
+    expect(owner.text?.length).toBe(OWNER_CHARS);
 
-  test("agent text is capped at the tail, AGENT_CHARS", () => {
-    const t = turn({ id: "b", author: "agent", text: "x".repeat(3000) + "END" });
-    const text = batchTurn(t).text ?? "";
-    expect(text.length).toBe(AGENT_CHARS);
-    expect(text.endsWith("END")).toBe(true);
-  });
+    const agent = redactTurn(
+      turn({
+        id: "a1",
+        author: "agent",
+        text: `${"X".repeat(200)}${"Z".repeat(AGENT_CHARS)}`,
+        actions: [
+          { tool: "read", summary: "secret-file.ts" },
+          { tool: "read", summary: "other.ts" },
+        ],
+        trigger: { from: "agent", type: "async-result" },
+      }),
+    );
+    expect(agent.text).toBe("Z".repeat(AGENT_CHARS));
+    expect(agent.tools).toEqual({ read: 2 });
+    expect(JSON.stringify(agent)).not.toContain("secret-file");
+    expect(agent.trigger).toBeUndefined();
 
-  test("guest text is replaced by the placeholder and never sent", () => {
-    const t = turn({ id: "a", author: "owner", text: "top secret", guest: true });
-    const out = batchTurn(t);
-    expect(out.text).toBe(GUEST_PLACEHOLDER);
-    expect(out.guest).toBe(true);
-    expect(JSON.stringify(out)).not.toContain("top secret");
-  });
+    const guest = redactTurn(turn({ id: "g1", author: "owner", guest: true, text: "private guest text" }));
+    expect(guest.text).toBe(GUEST_PLACEHOLDER);
 
-  test("agent turns send tool counts only, not summaries", () => {
-    const t = turn({
-      id: "b",
-      author: "agent",
-      text: "ok",
-      actions: [
-        { tool: "bash", summary: "rm -rf secret-dir" },
-        { tool: "bash", summary: "cat secret.env" },
-        { tool: "read", summary: "/etc/secret" },
-      ],
-    });
-    const out = batchTurn(t);
-    expect(out.tools).toEqual({ bash: 2, read: 1 });
-    expect(JSON.stringify(out)).not.toContain("secret");
-  });
-
-  test("an agent-origin trigger is omitted entirely", () => {
-    const t = turn({ id: "b", author: "agent", text: "ok", trigger: { from: "agent", type: "subagent-result" } });
-    const out = batchTurn(t);
-    expect(out.trigger).toBeUndefined();
-    expect(JSON.stringify(out)).not.toContain("subagent-result");
-  });
-
-  test("an owner-origin trigger is sent, capped at TRIGGER_CHARS", () => {
-    const t = turn({ id: "b", author: "agent", text: "ok", trigger: { from: "owner", text: "Q".repeat(1000) } });
-    expect(batchTurn(t).trigger).toEqual({ from: "owner", text: "Q".repeat(TRIGGER_CHARS) });
-    expect(payloadText(t).length).toBe("ok".length + TRIGGER_CHARS);
-  });
-
-  test("fixedIntent is passed only to agent turns", () => {
-    const agent = turn({ id: "b", author: "agent", text: "ok" });
-    const owner = turn({ id: "a", author: "owner", text: "hi" });
-    expect(batchTurn(agent, "i3").fixedIntent).toBe("i3");
-    expect(batchTurn(owner, "i3").fixedIntent).toBeUndefined();
+    const ownerTrig = redactTurn(
+      turn({
+        id: "a2",
+        author: "agent",
+        text: "done",
+        trigger: { from: "owner", text: "T".repeat(TRIGGER_CHARS + 20) },
+      }),
+    );
+    expect(ownerTrig.trigger?.text.length).toBe(TRIGGER_CHARS);
   });
 });
 
-describe("label()", () => {
+describe("extractGraph()", () => {
   let fake: FakeLabeler;
 
   beforeEach(() => {
     fake = startFakeLabeler();
-    fake.respond = () =>
-      answer([
-        { ref: "a", kind: "asked", caption: "asks about login", intent: "i1" },
-        { ref: "b", kind: "did", caption: "patches login", intent: "i1" },
-      ]);
   });
 
   afterEach(() => {
     fake.stop();
   });
 
-  test("POSTs to /chat/completions with the input as the user message", async () => {
-    const parsed = await label({ baseUrl: fake.url, model: "m1" }, input, {});
-    expect(parsed.answers.length).toBe(2);
-    const req = fake.requests[0];
-    expect(req?.path).toBe("/v1/chat/completions");
-    expect(req?.auth).toBeNull();
-    expect(req?.input).toEqual(input);
-    expect(req?.body).toMatchObject({ model: "m1", temperature: 0, response_format: { type: "json_object" } });
-  });
+  test("POSTs to /chat/completions with Bearer auth and returns validated SessionGraph", async () => {
+    fake.respond = () =>
+      JSON.stringify({
+        title: "Test Graph",
+        nodes: [{ id: "g1", kind: "goal", badge: "GOAL", title: "Root", desc: "Desc", turnIds: ["t1"] }],
+        edges: [],
+      });
 
-  test("sends the key from apiKeyEnv as a Bearer token", async () => {
-    await label({ baseUrl: fake.url, model: "m1", apiKeyEnv: "MY_KEY" }, input, { MY_KEY: "sek" });
-    expect(fake.requests[0]?.auth).toBe("Bearer sek");
-  });
-
-  test("a set apiKeyEnv naming an unset variable fails before any request", async () => {
-    await expect(label({ baseUrl: fake.url, model: "m1", apiKeyEnv: "MISSING" }, input, {})).rejects.toThrow(
-      /MISSING, which is not set/,
+    const input: GraphExtractInput = {
+      turns: [redactTurn(turn({ id: "t1", author: "owner", text: "hello" }))],
+    };
+    const g = await extractGraph(
+      { baseUrl: fake.url, model: "test-model", apiKeyEnv: "TEST_KEY" },
+      input,
+      new Map([["t1", 1000]]),
+      { TEST_KEY: "secret-123" },
     );
-    expect(fake.requests.length).toBe(0);
+
+    expect(g.mode).toBe("llm");
+    expect(g.nodes[0]?.id).toBe("g1");
+    expect(fake.requests[0]?.path).toBe("/v1/chat/completions");
+    expect(fake.requests[0]?.auth).toBe("Bearer secret-123");
   });
 
-  test("an unconfigured labeler fails before any request", async () => {
-    await expect(label({}, input, {})).rejects.toThrow(/labeler not configured/);
-    expect(fake.requests.length).toBe(0);
+  test("fails cleanly when unconfigured, missing apiKeyEnv, or non-200 HTTP", async () => {
+    const input: GraphExtractInput = { turns: [] };
+    await expect(extractGraph({}, input, new Map())).rejects.toThrow("labeler not configured");
+    await expect(extractGraph({ baseUrl: fake.url, model: "m", apiKeyEnv: "UNSET" }, input, new Map(), {})).rejects.toThrow(
+      "UNSET",
+    );
+
+    fake.status = 502;
+    await expect(extractGraph({ baseUrl: fake.url, model: "m" }, input, new Map())).rejects.toThrow("HTTP 502");
+  });
+});
+
+describe("extractGraph via claude-cli provider", () => {
+  let dir = "";
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "ipg-cli-test-"));
   });
 
-  test("an HTTP error surfaces the status", async () => {
-    fake.status = 500;
-    await expect(label({ baseUrl: fake.url, model: "m1" }, input, {})).rejects.toThrow(/labeler HTTP 500/);
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
   });
 
-  test("a reply that fails validation throws and is not partially used", async () => {
-    fake.respond = () => answer([{ ref: "a", kind: "found", caption: "c", intent: "i1" }]);
-    await expect(label({ baseUrl: fake.url, model: "m1" }, input, {})).rejects.toThrow(/labeler output/);
+  test("isLabelerConfigured distinguishes openai and claude-cli providers", () => {
+    expect(isLabelerConfigured(undefined)).toBe(false);
+    expect(isLabelerConfigured({ model: "haiku" })).toBe(false);
+    expect(isLabelerConfigured({ baseUrl: "http://x", model: "m" })).toBe(true);
+    expect(isLabelerConfigured({ provider: "claude-cli", model: "haiku" })).toBe(true);
+    expect(isLabelerConfigured({ provider: "claude-cli" })).toBe(false);
+  });
+
+  test("extracts outermost JSON object when model emits surrounding prose", () => {
+    const raw = `Here is the decision graph:\n{"title":"Wrapped","nodes":[{"id":"n1","kind":"goal","title":"Start","turnIds":["t1"]}],"edges":[]}\nDone.`;
+    const g = parseGraphOutput(raw, new Map([["t1", 1234]]));
+    expect(g.title).toBe("Wrapped");
+    expect(g.nodes[0]?.at).toBe(1234);
+  });
+
+  test("spawns claude CLI with no-session-persistence, empty tools, and pipes redacted JSON", async () => {
+    const script = join(dir, "fake-claude.sh");
+    writeFileSync(
+      script,
+      `#!/bin/sh
+echo "stderr warning ignored on success" >&2
+case " $* " in
+  *" -p "*) ;;
+  *) echo "missing -p" >&2; exit 2 ;;
+esac
+case " $* " in
+  *" --no-session-persistence "*) ;;
+  *) echo "missing --no-session-persistence" >&2; exit 3 ;;
+esac
+cat >/dev/null
+printf '{"title":"CLI Graph","nodes":[{"id":"g1","kind":"goal","badge":"GOAL","title":"From CLI","desc":"Parsed from stdout","rationaleLabel":"Context","rationale":"Test","turnIds":["t1"]}],"edges":[]}\n'
+`,
+    );
+    chmodSync(script, 0o755);
+
+    const input: GraphExtractInput = {
+      turns: [redactTurn(turn({ id: "t1", author: "owner", text: "build it" }))],
+    };
+    const g = await extractGraph(
+      { provider: "claude-cli", model: "haiku", command: script },
+      input,
+      new Map([["t1", 5000]]),
+    );
+
+    expect(g.mode).toBe("llm");
+    expect(g.title).toBe("CLI Graph");
+    expect(g.nodes[0]?.title).toBe("From CLI");
+    expect(g.nodes[0]?.at).toBe(5000);
+  });
+
+  test("surfaces stderr cleanly when claude-cli exits non-zero", async () => {
+    const script = join(dir, "fail-claude.sh");
+    writeFileSync(script, "#!/bin/sh\necho 'auth expired' >&2\nexit 1\n");
+    chmodSync(script, 0o755);
+
+    await expect(
+      extractGraph({ provider: "claude-cli", model: "haiku", command: script }, { turns: [] }, new Map()),
+    ).rejects.toThrow("claude-cli exited 1: auth expired");
   });
 });

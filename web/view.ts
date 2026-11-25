@@ -1,28 +1,17 @@
-import type { Intent, Kind, Label, Turn } from "../src/model";
-import { chipPos, type Point, turnPos } from "./layout";
+import type { GraphEdge, GraphNode, NodeKind, SessionGraph, Turn } from "../src/model";
+import { edgePath, layoutGraph, NODE_H, NODE_W, type Point } from "./layout";
 
-/** What the page knows, rebuilt from the SSE stream. Labels may name turns not yet received. */
+export type FilterMode = "all" | "chosen" | "decisions";
+
 export interface State {
   connected: boolean;
   labelerError?: string;
   turns: Turn[];
-  intents: Map<string, Intent>;
-  labels: Map<string, Label>;
-  /** Intent in focus. When unset or without turns, the newest labelled turn's intent is used. */
-  focus?: string;
-  /** Selected turn. When unset, the newest labelled turn is used. */
+  graph: SessionGraph;
   selected?: string;
+  filter: FilterMode;
   follow: boolean;
-  /** Newest turn the owner has seen. A newer turn raises the toast while Follow is off. */
-  seen?: string;
-}
-
-export interface Derived {
-  intentOf: Map<string, string>;
-  byIntent: Map<string, Turn[]>;
-  unlabeled: Turn[];
-  latest?: Turn;
-  focus?: string;
+  seenNodeId?: string;
 }
 
 export interface View {
@@ -32,318 +21,371 @@ export interface View {
 }
 
 export interface Els {
+  statusDot: HTMLElement;
+  sessionTitle: HTMLElement;
+  modePill: HTMLElement;
+  sidebar: HTMLElement;
   viewport: HTMLElement;
   world: HTMLElement;
   edges: SVGSVGElement;
   nodes: HTMLElement;
-  /** Node elements by key, reused across paints so CSS transitions run. */
   keyed: Map<string, HTMLElement>;
-  intents: HTMLElement;
   panel: HTMLElement;
   banner: HTMLElement;
   toast: HTMLElement;
   follow: HTMLElement;
 }
 
-export interface Slot {
-  key: string;
-  p: Point;
-  w: number;
-  h: number;
-  cls: string;
-  html: string;
-  data: Record<string, string>;
-  fade: number;
-  kind?: Kind;
-  card: boolean;
-}
-
-const KIND_WORD: Record<Kind, string> = {
-  asked: "ASKED",
-  approved: "APPROVED",
-  found: "FOUND",
-  did: "DID",
-  advises: "ADVISES",
-};
-const HUB = { w: 260, h: 120 };
-const CARD = { w: 220, h: 90 };
-const CHIP = { w: 200, h: 48 };
-const MIN_ZOOM = 0.2;
-const MAX_ZOOM = 3;
+const MIN_ZOOM = 0.25;
+const MAX_ZOOM = 2.2;
 const ENTITIES: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+
+const KIND_COLOR: Record<NodeKind, string> = {
+  goal: "var(--goal)",
+  chosen: "var(--chosen)",
+  rejected: "var(--rejected)",
+  option: "var(--option)",
+  decision: "var(--decision)",
+  loop: "var(--loop)",
+  side: "var(--side)",
+};
 
 function esc(s: string): string {
   return s.replace(/[&<>"']/g, (ch) => ENTITIES[ch] ?? ch);
 }
 
-function ago(at: number, now: number): string {
-  const sec = Math.max(0, Math.floor((now - at) / 1000));
-  if (sec < 60) return "just now";
-  const min = Math.floor(sec / 60);
-  if (min < 60) return `${min}m ago`;
-  const hr = Math.floor(min / 60);
-  return hr < 24 ? `${hr}h ago` : `${Math.floor(hr / 24)}d ago`;
+function clock(at: number): string {
+  if (!at) return "";
+  return new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
-const clock = (at: number): string => new Date(at).toLocaleString();
-
-const UNSORTED_SHOWN = 12;
-const UNSORTED = "unsorted";
-
-function titleOf(s: State, id: string | undefined): string {
-  if (id === UNSORTED) return "Unsorted turns";
-  return (id === undefined ? undefined : s.intents.get(id)?.title) ?? "Untitled";
-}
-
-function headOf(t: Turn, label: Label | undefined): string {
-  const who = t.author === "owner" ? "YOU" : "AGENT";
-  return label ? `${who} ${KIND_WORD[label.kind]}` : who;
-}
-
-/** A turn's intent: its own label, else the label of the owner turn that opened it. */
-function intentFor(s: State, t: Turn, byId: Map<string, Turn>): string | undefined {
-  const seen = new Set<string>();
-  let cur: Turn | undefined = t;
-  while (cur && !seen.has(cur.id)) {
-    const label = s.labels.get(cur.id);
-    if (label && s.intents.has(label.intentId)) return label.intentId;
-    seen.add(cur.id);
-    cur = cur.openedBy === undefined ? undefined : byId.get(cur.openedBy);
+/**
+ * Determines whether a node should be visually dimmed under the active filter mode.
+ *
+ * Args:
+ *     node (GraphNode): Node to evaluate.
+ *     filter (FilterMode): Active filter mode ("all" | "chosen" | "decisions").
+ *
+ * Returns:
+ *     boolean: True when the node should be dimmed.
+ */
+export function isNodeDimmed(node: GraphNode, filter: FilterMode): boolean {
+  if (filter === "all") return false;
+  if (filter === "chosen") {
+    return !(node.kind === "goal" || node.kind === "chosen" || node.kind === "decision" || node.kind === "loop");
   }
-  return undefined;
+  return !(node.kind === "goal" || node.kind === "decision" || node.kind === "rejected");
 }
 
-export function derive(s: State): Derived {
-  const byId = new Map(s.turns.map((t) => [t.id, t] as const));
-  const intentOf = new Map<string, string>();
-  const byIntent = new Map<string, Turn[]>();
-  const unlabeled: Turn[] = [];
-  let latest: Turn | undefined;
-  for (const t of s.turns) {
-    const id = intentFor(s, t, byId);
-    if (id === undefined) {
-      unlabeled.push(t);
-      continue;
+/**
+ * Determines whether an edge should be visually dimmed under the active filter mode.
+ *
+ * Args:
+ *     edge (GraphEdge): Edge to evaluate.
+ *     byId (ReadonlyMap<string, GraphNode>): Nodes keyed by id.
+ *     filter (FilterMode): Active filter mode.
+ *
+ * Returns:
+ *     boolean: True when either endpoint is dimmed.
+ */
+export function isEdgeDimmed(edge: GraphEdge, byId: ReadonlyMap<string, GraphNode>, filter: FilterMode): boolean {
+  if (filter === "all") return false;
+  const a = byId.get(edge.from);
+  const b = byId.get(edge.to);
+  if (!a || !b) return true;
+  return isNodeDimmed(a, filter) || isNodeDimmed(b, filter);
+}
+
+/**
+ * Returns the latest node in the graph (the node with the highest timestamp, or the last node).
+ *
+ * Args:
+ *     graph (SessionGraph): Current session graph.
+ *
+ * Returns:
+ *     GraphNode | undefined: The latest node, or undefined when the graph is empty.
+ */
+export function latestNode(graph: SessionGraph): GraphNode | undefined {
+  let best: GraphNode | undefined;
+  for (const n of graph.nodes) {
+    if (!best || n.at >= best.at) best = n;
+  }
+  return best;
+}
+
+/**
+ * Resolves the currently selected node, falling back to the latest node in the graph.
+ *
+ * Args:
+ *     s (State): Current UI state.
+ *
+ * Returns:
+ *     GraphNode | undefined: Selected node if the graph has any nodes.
+ */
+export function selectedNode(s: State): GraphNode | undefined {
+  if (s.selected) {
+    const found = s.graph.nodes.find((n) => n.id === s.selected);
+    if (found) return found;
+  }
+  return latestNode(s.graph);
+}
+
+export interface GraphSummary {
+  outcomes: GraphNode[];
+  rejected: GraphNode[];
+  decisionsCount: number;
+  loopsCount: number;
+}
+
+/**
+ * Summarizes the graph into Executive Summary buckets for the left sidebar.
+ *
+ * Args:
+ *     graph (SessionGraph): Current session graph.
+ *
+ * Returns:
+ *     GraphSummary: Chosen outcomes, rejected/unchosen paths, and counts.
+ */
+export function summarizeGraph(graph: SessionGraph): GraphSummary {
+  const outcomes = graph.nodes.filter((n) => n.kind === "chosen");
+  const rejected = graph.nodes.filter((n) => n.kind === "rejected" || n.kind === "option");
+  const decisionsCount = graph.nodes.filter((n) => n.kind === "decision" || n.kind === "rejected").length;
+  const loopsCount = graph.nodes.filter((n) => n.kind === "loop").length;
+  return { outcomes, rejected, decisionsCount, loopsCount };
+}
+
+function turnsLabel(n: GraphNode): string {
+  const count = n.turnIds.length;
+  const time = clock(n.at);
+  if (count === 0) return time;
+  const tPart = count === 1 ? "1 turn" : `${count} turns`;
+  return time ? `${tPart} · ${time}` : tPart;
+}
+
+/**
+ * Renders the top bar (status dot, session title, LLM/Heuristic mode pill).
+ *
+ * Args:
+ *     s (State): Current UI state.
+ *     els (Els): Cached DOM element references.
+ *
+ * Returns:
+ *     void
+ */
+export function paintTopbar(s: State, els: Els): void {
+  els.statusDot.className = s.connected ? "dot" : "dot offline";
+  els.sessionTitle.textContent = s.graph.title || "intent-prompt-graph";
+  els.modePill.textContent = s.graph.mode === "llm" ? "LLM graph" : "Heuristic graph";
+  els.modePill.className = s.graph.mode === "llm" ? "pill llm" : "pill";
+}
+
+/**
+ * Renders the Left Executive Summary sidebar (Session Overview, Chosen Outcomes, Rejected Paths).
+ *
+ * Args:
+ *     s (State): Current UI state.
+ *     els (Els): Cached DOM element references.
+ *
+ * Returns:
+ *     void
+ */
+export function paintSidebar(s: State, els: Els): void {
+  const sum = summarizeGraph(s.graph);
+  const selId = selectedNode(s)?.id;
+  const turnCount = s.turns.length;
+  const nodeCount = s.graph.nodes.length;
+
+  const pills = [
+    `${turnCount} turns → ${nodeCount} nodes`,
+    sum.decisionsCount > 0 ? `${sum.decisionsCount} decisions` : "",
+    sum.rejected.length > 0 ? `${sum.rejected.length} ruled out` : "",
+    sum.loopsCount > 0 ? `${sum.loopsCount} loops collapsed` : "",
+  ]
+    .filter(Boolean)
+    .map((p) => `<span class="pill">${esc(p)}</span>`)
+    .join("");
+
+  const renderList = (items: GraphNode[], color: string, empty: string): string => {
+    if (items.length === 0) return `<p class="empty-note">${esc(empty)}</p>`;
+    return `<ul class="summary-list">${items
+      .map(
+        (n) =>
+          `<li class="summary-item${n.id === selId ? " on" : ""}" style="--c:${color}" data-jump="${esc(n.id)}">` +
+          `<div class="st">${esc(n.title)}</div>` +
+          `<div class="sd">${esc(n.desc)}</div>` +
+          `</li>`,
+      )
+      .join("")}</ul>`;
+  };
+
+  els.sidebar.innerHTML =
+    `<div><div class="sec-title">Session Overview</div><h2 class="session-heading">${esc(s.graph.title || "Waiting for turns")}</h2><div class="session-meta">${pills}</div></div>` +
+    `<div><div class="sec-title">Chosen Path &amp; Outcomes</div>${renderList(sum.outcomes, "var(--chosen)", "No final outcomes yet.")}</div>` +
+    `<div><div class="sec-title">Rejected / Unchosen Paths</div>${renderList(sum.rejected, "var(--rejected)", "No paths rejected or skipped yet.")}</div>`;
+}
+
+/**
+ * Renders the layered DAG nodes and directed cubic-Bezier SVG edges into the viewport world.
+ *
+ * Args:
+ *     s (State): Current UI state.
+ *     els (Els): Cached DOM element references.
+ *
+ * Returns:
+ *     Map<string, Point>: Computed layout positions for all rendered nodes.
+ */
+export function paintGraph(s: State, els: Els): Map<string, Point> {
+  const positions = layoutGraph(s.graph.nodes, s.graph.edges);
+  const byId = new Map(s.graph.nodes.map((n) => [n.id, n] as const));
+  const selId = selectedNode(s)?.id;
+  const latestId = latestNode(s.graph)?.id;
+
+  els.edges.innerHTML = s.graph.edges
+    .map((e) => {
+      const a = positions.get(e.from);
+      const b = positions.get(e.to);
+      if (!a || !b) return "";
+      const geom = edgePath(a, b);
+      const dim = isEdgeDimmed(e, byId, s.filter) ? " dimmed" : "";
+      const labelSvg = e.label
+        ? `<text class="edge-label ${e.kind}${dim}" x="${geom.lx}" y="${geom.ly}" text-anchor="middle">${esc(e.label)}</text>`
+        : "";
+      return `<path class="edge ${e.kind}${dim}" d="${geom.d}"/>${labelSvg}`;
+    })
+    .join("");
+
+  const keep = new Set<string>();
+  for (const n of s.graph.nodes) {
+    const p = positions.get(n.id);
+    if (!p) continue;
+    keep.add(n.id);
+    let el = els.keyed.get(n.id);
+    if (!el) {
+      el = document.createElement("div");
+      els.keyed.set(n.id, el);
+      els.nodes.append(el);
     }
-    intentOf.set(t.id, id);
-    const list = byIntent.get(id) ?? [];
-    list.push(t);
-    byIntent.set(id, list);
-    latest = t;
-  }
-  // Nothing labelled yet (labeler off, failing or still working): show the turns instead of an empty page.
-  if (byIntent.size === 0 && unlabeled.length > 0) {
-    for (const t of unlabeled) intentOf.set(t.id, UNSORTED);
-    byIntent.set(UNSORTED, unlabeled.splice(0));
-    latest = byIntent.get(UNSORTED)?.at(-1);
-  }
-  const kept = s.focus !== undefined && byIntent.has(s.focus);
-  const focus = kept ? s.focus : latest && intentOf.get(latest.id);
-  return { intentOf, byIntent, unlabeled, latest, focus };
-}
-
-/** The selected turn, or the newest labelled turn when none is selected. */
-export function selected(s: State, d: Derived): Turn | undefined {
-  const id = s.selected ?? d.latest?.id;
-  return s.turns.find((t) => t.id === id);
-}
-
-function cardHtml(t: Turn, label: Label | undefined, now: number): string {
-  const guest = t.guest ? " · guest" : "";
-  const step = t.actions.at(-1);
-  const live = t.open ? `<div class="live">${esc(step ? `${step.tool}: ${step.summary}` : "working…")}</div>` : "";
-  return (
-    `<div class="kind">${esc(headOf(t, label))}${guest}<span class="when"> · ${esc(ago(t.at, now))}</span></div>` +
-    `<div class="caption">${esc(label?.caption ?? t.text.slice(0, 120))}</div>${live}`
-  );
-}
-
-/** Every node on the page with its position: the hub, the focused intent's turns, and the chips. */
-export function slotsOf(s: State, d: Derived, now: number): Slot[] {
-  const all = (d.focus === undefined ? undefined : d.byIntent.get(d.focus)) ?? [];
-  // Without a labeler every turn lands in one bucket; 150 cards in one ring cannot be read, so draw the newest few.
-  const cards = d.focus === UNSORTED ? all.slice(-UNSORTED_SHOWN) : all;
-  const n = cards.length;
-  const order = new Map(s.turns.map((t, i) => [t.id, i] as const));
-  const sel = selected(s, d)?.id;
-  const last = cards.at(-1);
-  const slots: Slot[] = [
-    {
-      key: "hub",
-      p: { x: 0, y: 0 },
-      w: HUB.w,
-      h: HUB.h,
-      cls: "node hub focus",
-      html:
-        d.focus === undefined
-          ? `<div class="title">Waiting for turns</div><div class="meta">0 turns</div>`
-          : `<div class="title">${esc(titleOf(s, d.focus))}</div><div class="meta">${all.length > n ? `newest ${n} of ${all.length}` : `${n}`} turns · ${last ? esc(ago(last.at, now)) : "no activity"}</div>`,
-      data: {},
-      fade: 1,
-      card: false,
-    },
-  ];
-  cards.forEach((t, k) => {
-    const label = s.labels.get(t.id);
-    const rank = s.turns.length - 1 - (order.get(t.id) ?? 0);
     const cls = [
       "node",
-      "card",
-      label && `kind-${label.kind}`,
-      t.open && "open",
-      t.id === d.latest?.id && "latest",
-      t.id === sel && "selected",
+      `kind-${n.kind}`,
+      n.id === selId && "selected",
+      n.id === latestId && "latest",
+      isNodeDimmed(n, s.filter) && "dimmed",
     ]
       .filter(Boolean)
       .join(" ");
-    slots.push({
-      key: `turn:${t.id}`,
-      p: turnPos(k + 1),
-      w: CARD.w,
-      h: CARD.h,
-      cls,
-      html: cardHtml(t, label, now),
-      data: { turn: t.id },
-      fade: Math.max(0.35, 0.5 ** (rank / 15)),
-      kind: label?.kind,
-      card: true,
-    });
-  });
-  const others = [...s.intents.keys()].filter((id) => id !== d.focus && d.byIntent.has(id));
-  others.forEach((id, k) => {
-    const turns = d.byIntent.get(id) ?? [];
-    const kinds = new Set<Kind>();
-    for (const t of turns) {
-      const kind = s.labels.get(t.id)?.kind;
-      if (kind) kinds.add(kind);
-    }
-    const dots = [...kinds].map((kind) => `<i class="dot kind-${kind}"></i>`).join("");
-    slots.push({
-      key: `intent:${id}`,
-      p: chipPos(n, k + 1),
-      w: CHIP.w,
-      h: CHIP.h,
-      cls: "node chip",
-      html: `<div class="name">${esc(titleOf(s, id))}</div><div class="count">${turns.length} turns ${dots}</div>`,
-      data: { intent: id },
-      fade: 1,
-      card: false,
-    });
-  });
-  if (d.unlabeled.length > 0) {
-    slots.push({
-      key: "sorting",
-      p: chipPos(n, others.length + 1),
-      w: CHIP.w,
-      h: CHIP.h,
-      cls: `node chip sorting${s.labelerError ? " error" : ""}`,
-      html: `<div class="name">Sorting…</div><div class="count">${d.unlabeled.length} unlabeled</div>`,
-      data: { sorting: "1" },
-      fade: 1,
-      card: false,
-    });
+    el.className = cls;
+    el.dataset.node = n.id;
+    el.style.left = `${p.x}px`;
+    el.style.top = `${p.y}px`;
+    el.innerHTML =
+      `<div class="node-head"><span>${esc(n.badge)}</span><span class="node-turns">${esc(turnsLabel(n))}</span></div>` +
+      `<div class="node-title">${esc(n.title)}</div>` +
+      `<div class="node-desc">${esc(n.desc)}</div>`;
   }
-  return slots;
-}
 
-function sidebarHtml(s: State, d: Derived): string {
-  const rows = [...s.intents.values()].map((i) => ({ i, turns: d.byIntent.get(i.id) ?? [] }));
-  rows.sort((a, b) => (b.turns.at(-1)?.at ?? b.i.createdAt) - (a.turns.at(-1)?.at ?? a.i.createdAt));
-  const unsorted = d.byIntent.get(UNSORTED);
-  const head = unsorted
-    ? `<li data-intent="${UNSORTED}" class="${UNSORTED === d.focus ? "on" : ""}"><span>Unsorted turns</span><span>${unsorted.length}</span></li>`
-    : "";
-  return (
-    head +
-    rows
-    .map(
-      ({ i, turns }) =>
-        `<li data-intent="${esc(i.id)}" class="${i.id === d.focus ? "on" : ""}"><span>${esc(i.title)}</span><span>${turns.length}</span></li>`,
-    )
-      .join("")
-  );
-}
-
-function panelHtml(s: State, d: Derived, now: number): string {
-  const t = selected(s, d);
-  if (!t) return `<p class="meta">No turns yet.</p>`;
-  const label = s.labels.get(t.id);
-  const intentId = d.intentOf.get(t.id);
-  const thread = intentId === undefined ? [] : (d.byIntent.get(intentId) ?? []);
-  const actions =
-    t.actions.length > 0
-      ? `<h3>Actions</h3><ul class="actions">${t.actions.map((a) => `<li><b>${esc(a.tool)}</b> ${esc(a.summary)}</li>`).join("")}</ul>`
-      : "";
-  const items = thread
-    .map((x) => {
-      const cap = s.labels.get(x.id)?.caption ?? x.text.slice(0, 120);
-      return `<li data-turn="${esc(x.id)}" class="${x.id === t.id ? "on" : ""}"><span class="when">${esc(clock(x.at))}</span>${esc(cap)}</li>`;
-    })
-    .join("");
-  return (
-    `<h2>${esc(headOf(t, label))}</h2>` +
-    `<div class="meta">${esc(clock(t.at))} · ${esc(ago(t.at, now))} · in ${esc(titleOf(s, intentId))}${t.guest ? " · guest" : ""}</div>` +
-    `<div class="text">${esc(t.text)}</div>${actions}<h3>Thread</h3><ol>${items}</ol>`
-  );
-}
-
-function place(els: Els, sl: Slot): void {
-  let el = els.keyed.get(sl.key);
-  if (!el) {
-    el = document.createElement("div");
-    els.keyed.set(sl.key, el);
-    els.nodes.append(el);
-  }
-  el.className = sl.cls;
-  el.innerHTML = sl.html;
-  el.style.left = `${sl.p.x}px`;
-  el.style.top = `${sl.p.y}px`;
-  el.style.setProperty("--fade", String(sl.fade));
-  Object.assign(el.dataset, sl.data);
-}
-
-/** Redraws nodes, edges, sidebar and panel. Nodes are reused by key so their position transitions run. */
-export function paint(s: State, d: Derived, els: Els, now: number): void {
-  const slots = slotsOf(s, d, now);
-  els.edges.innerHTML = slots
-    .filter((sl) => sl.card)
-    .map((sl) => {
-      const { x, y } = sl.p;
-      const cx = x / 2 - y * 0.15;
-      const cy = y / 2 + x * 0.15;
-      return `<path class="${sl.kind ? `kind-${sl.kind}` : ""}" d="M0 0 Q${cx} ${cy} ${x} ${y}" style="opacity:${sl.fade}"/>`;
-    })
-    .join("");
-  for (const sl of slots) place(els, sl);
-  const keep = new Set(slots.map((sl) => sl.key));
-  for (const [key, el] of els.keyed) {
-    if (keep.has(key)) continue;
+  for (const [id, el] of els.keyed) {
+    if (keep.has(id)) continue;
     el.remove();
-    els.keyed.delete(key);
+    els.keyed.delete(id);
   }
-  els.intents.innerHTML = sidebarHtml(s, d);
-  els.panel.innerHTML = panelHtml(s, d, now);
+
+  return positions;
 }
 
-function labelerNotice(error: string): string {
-  return error.startsWith("labeler not configured")
-    ? "No labeler configured, so turns are not grouped into intents. Set labeler.baseUrl and labeler.model in ~/.config/intent-prompt-graph/config.json."
-    : `Labeler error: ${error}`;
+/**
+ * Computes a signature for the right inspector panel so it is only re-rendered when its content changes.
+ *
+ * Args:
+ *     s (State): Current UI state.
+ *
+ * Returns:
+ *     string: Stable cache key for the currently inspected node and its source turns.
+ */
+export function inspectorSignature(s: State): string {
+  const n = selectedNode(s);
+  if (!n) return "empty";
+  const byTurn = new Map(s.turns.map((t) => [t.id, t] as const));
+  const turnSig = n.turnIds.map((id) => {
+    const t = byTurn.get(id);
+    return t ? `${t.id}:${t.text.length}:${t.actions.length}:${t.open ? 1 : 0}` : id;
+  });
+  return `${n.id}|${n.kind}|${n.title}|${n.rationale}|${turnSig.join(",")}`;
 }
 
-/** Banner, toast and the Follow button. */
-export function chrome(s: State, d: Derived, els: Els): void {
+/**
+ * Renders the Right Inspector panel with rationale and full source transcript excerpts.
+ *
+ * Args:
+ *     s (State): Current UI state.
+ *     els (Els): Cached DOM element references.
+ *
+ * Returns:
+ *     void
+ */
+export function paintInspector(s: State, els: Els): void {
+  const n = selectedNode(s);
+  if (!n) {
+    els.panel.innerHTML = `<p class="empty-note">Waiting for turns in this session…</p>`;
+    return;
+  }
+  const col = KIND_COLOR[n.kind];
+  const byTurn = new Map(s.turns.map((t) => [t.id, t] as const));
+  const turns = n.turnIds.map((id) => byTurn.get(id)).filter((t): t is Turn => t !== undefined);
+
+  const turnsHtml =
+    turns.length === 0
+      ? `<p class="empty-note">No linked transcript turns.</p>`
+      : `<div class="turn-list">${turns
+          .map((t) => {
+            const whoLabel = t.author === "owner" ? (t.guest ? "GUEST" : "YOU") : "AGENT";
+            const actionsHtml =
+              t.actions.length > 0
+                ? `<ul class="turn-actions">${t.actions
+                    .slice(0, 8)
+                    .map((a) => `<li><b>${esc(a.tool)}</b> ${esc(a.summary)}</li>`)
+                    .join("")}</ul>`
+                : "";
+            return (
+              `<div class="turn-card">` +
+              `<div class="turn-who ${t.author}"><span>${whoLabel}</span><span>${esc(clock(t.at))}</span></div>` +
+              `<div class="turn-body">${esc(t.text || "(tool calls only)")}</div>` +
+              actionsHtml +
+              `</div>`
+            );
+          })
+          .join("")}</div>`;
+
+  els.panel.innerHTML =
+    `<span class="panel-badge" style="color:${col}; background:rgba(255,255,255,.05); border:1px solid ${col}">${esc(n.badge)} · ${esc(turnsLabel(n))}</span>` +
+    `<h2 class="panel-title">${esc(n.title)}</h2>` +
+    `<div class="rationale-box" style="--accent:${col}"><div class="lbl">${esc(n.rationaleLabel)}</div><p>${esc(n.rationale)}</p></div>` +
+    `<div><div class="sec-title">Source Transcript (${turns.length})</div>${turnsHtml}</div>`;
+}
+
+/**
+ * Updates transient chrome elements: error/disconnect banner, new-activity toast, and Follow button.
+ *
+ * Args:
+ *     s (State): Current UI state.
+ *     els (Els): Cached DOM element references.
+ *
+ * Returns:
+ *     void
+ */
+export function paintChrome(s: State, els: Els): void {
   els.banner.hidden = s.connected && !s.labelerError;
-  els.banner.textContent = s.connected ? labelerNotice(s.labelerError ?? "") : "Connection lost. Reconnecting…";
-  const newest = s.turns.at(-1);
-  const unseen = !s.follow && newest !== undefined && newest.id !== s.seen;
+  els.banner.textContent = s.connected ? `Labeler error: ${s.labelerError ?? ""}` : "Connection lost. Reconnecting…";
+
+  const latest = latestNode(s.graph);
+  const unseen = !s.follow && latest !== undefined && latest.id !== s.seenNodeId;
   els.toast.hidden = !unseen;
-  if (newest && unseen) {
-    const id = d.intentOf.get(newest.id);
-    els.toast.textContent = `New turn in ${id === undefined ? "Sorting…" : titleOf(s, id)} — jump`;
-    els.toast.dataset.jump = newest.id;
+  if (latest && unseen) {
+    els.toast.textContent = `New update: ${latest.title} — jump`;
+    els.toast.dataset.jump = latest.id;
   }
-  els.follow.textContent = `Follow latest: ${s.follow ? "on" : "off"}`;
+
+  els.follow.textContent = `Follow: ${s.follow ? "on" : "off"}`;
   els.follow.setAttribute("aria-pressed", String(s.follow));
 }
 
@@ -355,19 +397,36 @@ export function applyView(world: HTMLElement, v: View): void {
   world.style.transform = `translate(${v.tx}px, ${v.ty}px) scale(${v.z})`;
 }
 
-/** The zoom and offset that centre the slots in a viewport of the given size. */
-export function fitView(slots: Slot[], vw: number, vh: number): View {
+/**
+ * Computes zoom and translation to fit all positioned nodes cleanly inside the viewport.
+ *
+ * Args:
+ *     positions (ReadonlyMap<string, Point>): Top-left coordinates of all rendered nodes.
+ *     vw (number): Viewport width in px.
+ *     vh (number): Viewport height in px.
+ *
+ * Returns:
+ *     View: Target zoom and translation coordinates.
+ */
+export function fitView(positions: ReadonlyMap<string, Point>, vw: number, vh: number): View {
+  if (positions.size === 0 || vw <= 0 || vh <= 0) return { z: 1, tx: 40, ty: 80 };
   let x0 = Infinity;
   let y0 = Infinity;
   let x1 = -Infinity;
   let y1 = -Infinity;
-  for (const sl of slots) {
-    x0 = Math.min(x0, sl.p.x - sl.w / 2);
-    x1 = Math.max(x1, sl.p.x + sl.w / 2);
-    y0 = Math.min(y0, sl.p.y - sl.h / 2);
-    y1 = Math.max(y1, sl.p.y + sl.h / 2);
+  for (const p of positions.values()) {
+    x0 = Math.min(x0, p.x);
+    y0 = Math.min(y0, p.y);
+    x1 = Math.max(x1, p.x + NODE_W);
+    y1 = Math.max(y1, p.y + NODE_H);
   }
-  const pad = 40;
-  const z = clampZoom(Math.min(vw / (x1 - x0 + 2 * pad), vh / (y1 - y0 + 2 * pad)));
-  return { z, tx: (-z * (x0 + x1)) / 2, ty: (-z * (y0 + y1)) / 2 };
+  const pad = 48;
+  const w = Math.max(1, x1 - x0 + 2 * pad);
+  const h = Math.max(1, y1 - y0 + 2 * pad);
+  const z = clampZoom(Math.min(1.05, Math.min(vw / w, vh / h)));
+  return {
+    z,
+    tx: (vw - (x1 - x0) * z) / 2 - x0 * z,
+    ty: (vh - (y1 - y0) * z) / 2 - y0 * z,
+  };
 }
