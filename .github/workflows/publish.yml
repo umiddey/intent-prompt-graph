@@ -1,5 +1,6 @@
-# Publishes intent-prompt-graph to npm on a v* tag via npm trusted publishing
-# (OIDC). No NPM_TOKEN secret exists or is used.
+# Publishes intent-prompt-graph to npm on every push to main whose package.json
+# version is not on npm yet, via npm trusted publishing (OIDC). No NPM_TOKEN
+# secret exists or is used. To release: bump "version" in package.json and push.
 #
 # One-time bootstrap: npm only lets a package get a trusted publisher once the
 # package exists. Publish 0.1.0 once by hand (owner `npm login`, then
@@ -9,7 +10,7 @@
 name: publish
 on:
   push:
-    tags: ['v*']
+    branches: [main]
 permissions:
   contents: read
   id-token: write
@@ -30,9 +31,19 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
       - run: bun test
-      - name: tag must equal v plus package.json version
+      - name: decide whether this version needs publishing
+        id: need
         run: |
+          name="$(node -p "require('./package.json').name")"
           ver="$(node -p "require('./package.json').version")"
-          echo "tag=$GITHUB_REF_NAME version=v$ver"
-          test "$GITHUB_REF_NAME" = "v$ver"
-      - run: npm publish --access public
+          if ! npm view "$name" name >/dev/null 2>&1; then
+            echo "::notice::$name is not on npm yet; do the one-time manual publish first"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          elif npm view "$name@$ver" version 2>/dev/null | grep -qx "$ver"; then
+            echo "::notice::$name@$ver is already on npm; nothing to publish"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.need.outputs.publish == 'true'
+        run: npm publish --access public
