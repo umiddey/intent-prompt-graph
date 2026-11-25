@@ -93,10 +93,11 @@ function clock(at: number): string {
 }
 
 /**
- * Maps a node or edge kind to one of the three colour groups of the palette.
+ * Maps a node kind to one of the three colour groups of the palette. A card shows its group as a
+ * left bar; an edge takes the group of the node it leads to.
  *
  * Args:
- *     kind (NodeKind): Node kind, or an edge kind (every edge kind is also a node kind).
+ *     kind (NodeKind): Node kind.
  *
  * Returns:
  *     ColorGroup: "chosen" for goal/chosen, "rejected" for rejected/option, "other" for decision/loop/side.
@@ -253,7 +254,6 @@ export function paintTopbar(s: State, els: Els): void {
   els.statusDot.className = s.connected ? "dot" : "dot offline";
   els.sessionTitle.textContent = s.graph.title || "intent-prompt-graph";
   els.modePill.textContent = s.graph.mode === "llm" ? "LLM graph" : "Heuristic graph";
-  els.modePill.className = s.graph.mode === "llm" ? "pill llm" : "pill";
 }
 
 /**
@@ -319,21 +319,22 @@ export function paintGraph(s: State, els: Els): Map<string, Point> {
   const positions = layoutGraph(shown.nodes, shown.edges);
   const selId = selectedNode(s)?.id;
   const latestId = followTarget(s.graph)?.id;
+  const kindOf = new Map(shown.nodes.map((n) => [n.id, n.kind] as const));
 
   let paths = "";
   let labels = "";
   for (const e of shown.edges) {
     const a = positions.get(e.from);
     const b = positions.get(e.to);
-    if (!a || !b || e.from === e.to) continue;
+    const toKind = kindOf.get(e.to);
+    if (!a || !b || !toKind || e.from === e.to) continue;
     const geom = edgePath(a, b);
-    const cls = `${e.kind} grp-${colorGroup(e.kind)}`;
-    paths += `<path class="edge ${cls}" d="${geom.d}"/>`;
+    paths += `<path class="edge grp-${colorGroup(toKind)}" d="${geom.d}"/>`;
     if (!e.label) continue;
     // A label is as wide as the gap it sits in. On a level edge it rides above the line.
     const width = geom.vertical ? NODE_W - 24 : COL_GAP - 12;
     const place = geom.vertical ? " vertical" : a.y === b.y ? " above" : "";
-    labels += `<div class="edge-label ${cls}${place}" style="left:${geom.lx}px;top:${geom.ly}px;max-width:${width}px">${esc(e.label)}</div>`;
+    labels += `<div class="edge-label${place}" style="left:${geom.lx}px;top:${geom.ly}px;max-width:${width}px">${esc(e.label)}</div>`;
   }
   setHtml(els.edges, paths);
   setHtml(els.labels, labels);
@@ -379,10 +380,10 @@ export function paintGraph(s: State, els: Els): Map<string, Point> {
   return positions;
 }
 
-function summaryLine(key: string, group: ColorGroup, value: string, jump: GraphNode | undefined): string {
+function summaryLine(key: string, value: string, jump: GraphNode | undefined): string {
   const target = jump ? ` data-jump="${esc(jump.id)}"` : "";
   return (
-    `<div class="tl-sum grp-${group}${jump ? "" : " none"}"${target}>` +
+    `<div class="tl-sum${jump ? "" : " none"}"${target}>` +
     `<span class="k">${key}</span><span class="v">${esc(value)}</span></div>`
   );
 }
@@ -434,11 +435,10 @@ export function paintTimeline(s: State, els: Els): void {
   const ruledOut = sum.rejected.length;
   setHtml(
     els.tlSummary,
-    summaryLine("Goal", "chosen", sum.goal?.title ?? "No goal identified yet", sum.goal) +
-      summaryLine("Now", "other", sum.now?.title ?? "Waiting for turns in this session…", sum.now) +
+    summaryLine("Goal", sum.goal?.title ?? "No goal identified yet", sum.goal) +
+      summaryLine("Now", sum.now?.title ?? "Waiting for turns in this session…", sum.now) +
       summaryLine(
         "Rejected",
-        "rejected",
         ruledOut === 0 ? "Nothing ruled out yet" : `${ruledOut} ${ruledOut === 1 ? "path" : "paths"} ruled out · show the first`,
         sum.rejected[0],
       ),
@@ -511,7 +511,7 @@ export function paintInspector(s: State, els: Els): void {
                 : "";
             return (
               `<div class="turn-card">` +
-              `<div class="turn-who ${t.author}"><span>${whoLabel}</span><span>${esc(clock(t.at))}</span></div>` +
+              `<div class="turn-who"><span>${whoLabel}</span><span>${esc(clock(t.at))}</span></div>` +
               `<div class="turn-body">${esc(t.text || "(tool calls only)")}</div>` +
               actionsHtml +
               `</div>`

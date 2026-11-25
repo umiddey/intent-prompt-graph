@@ -24,7 +24,12 @@ import {
   type ViewMode,
 } from "./view";
 
+type Theme = "ink" | "paper";
+
 const VIEW_MODE_KEY = "ipg.viewMode";
+/** Also read by the inline script in index.html, which sets the theme before first paint. */
+const THEME_KEY = "ipg.theme";
+const THEME_NAME: Record<Theme, string> = { ink: "Ink", paper: "Paper" };
 
 function byId<T extends Element = HTMLElement>(id: string): T {
   const found = document.querySelector<T>(`#${id}`);
@@ -52,6 +57,7 @@ const els: Els = {
   follow: byId("follow"),
 };
 const stage = byId("stage");
+const themeButton = byId("theme");
 
 /** The view the reader last chose; the timeline when nothing is stored or storage is unavailable. */
 function storedViewMode(): ViewMode {
@@ -262,6 +268,25 @@ els.follow.addEventListener("click", () => {
 });
 byId("fit").addEventListener("click", () => glideFit());
 byId("reset").addEventListener("click", () => glideFit(1));
+
+/** Starts as the theme index.html put on <html> at load; the button flips it. */
+let theme: Theme = document.documentElement.dataset.theme === "paper" ? "paper" : "ink";
+
+function showTheme(): void {
+  document.documentElement.dataset.theme = theme;
+  themeButton.textContent = THEME_NAME[theme];
+}
+
+showTheme();
+themeButton.addEventListener("click", () => {
+  theme = theme === "ink" ? "paper" : "ink";
+  showTheme();
+  try {
+    localStorage.setItem(THEME_KEY, theme);
+  } catch {
+    // Storage is unavailable: the choice lasts for this page load only.
+  }
+});
 
 // Cursor-anchored wheel zoom.
 stage.addEventListener(

@@ -4,6 +4,15 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>intent-prompt-graph</title>
+<script>
+// Sets the theme before first paint: the stored choice, else the system colour scheme.
+(function () {
+  var theme = null;
+  try { theme = localStorage.getItem("ipg.theme"); } catch (e) {}
+  if (theme !== "ink" && theme !== "paper") theme = matchMedia("(prefers-color-scheme: light)").matches ? "paper" : "ink";
+  document.documentElement.dataset.theme = theme;
+})();
+</script>
 <link rel="stylesheet" href="./style.css">
 </head>
 <body>
@@ -14,10 +23,13 @@
       <span id="session-title">intent-prompt-graph</span>
       <span id="mode-pill" class="pill">heuristic</span>
     </div>
-    <div class="legend">
-      <span class="grp-chosen"><i class="swatch"></i>Goal / chosen</span>
-      <span class="grp-rejected"><i class="swatch"></i>Rejected / not chosen</span>
-      <span class="grp-other"><i class="swatch"></i>Decision / loop / side</span>
+    <div class="top-right">
+      <div class="legend">
+        <span class="grp-chosen"><i class="swatch"></i>Goal / chosen</span>
+        <span class="grp-rejected"><i class="swatch"></i>Rejected / not chosen</span>
+        <span class="grp-other"><i class="swatch"></i>Decision / loop / side</span>
+      </div>
+      <button id="theme" type="button" title="Switch colour theme"></button>
     </div>
   </header>
 
