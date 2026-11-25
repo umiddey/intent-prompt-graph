@@ -5,7 +5,7 @@ import { renderDecisionLog } from "./export";
 import { type Harness, harnessById, type SessionRef } from "./harness/harness";
 import { buildHeuristicGraph } from "./heuristic";
 import type { Turn } from "./model";
-import { APP, startDaemon } from "./server";
+import { APP, STOP_HEADER, startDaemon } from "./server";
 import { setupClaude, uninstall, writeLabeler } from "./setup";
 import { openStore } from "./store";
 import { tailJsonl } from "./tail";
@@ -18,6 +18,7 @@ const USAGE = [
   "       ipg setup claude",
   "       ipg setup labeler --provider claude-cli|openai --model <name> [--base-url <url>] [--api-key-env <VAR>] [--command <path>]",
   "       ipg setup labeler --off",
+  "       ipg stop [--port N]",
   "       ipg uninstall [--purge]",
 ].join("\n");
 
@@ -158,6 +159,31 @@ async function health(port: number): Promise<Health> {
   return ours ? "ours" : "foreign";
 }
 
+/** Asks our daemon on the port to exit. "old" means it predates `ipg stop` and only exits by idling out. */
+async function stopDaemon(port: number): Promise<"stopped" | "none" | "old"> {
+  if ((await health(port)) !== "ours") return "none";
+  const res = await fetch(`http://127.0.0.1:${port}/stop`, { method: "POST", headers: { [STOP_HEADER]: "1" } });
+  if (res.status === 404) return "old";
+  if (!res.ok) throw new Error(`page server on port ${port} refused to stop (${res.status})`);
+  const deadline = Date.now() + 3000;
+  while ((await health(port)) !== "none") {
+    if (Date.now() >= deadline) throw new Error(`page server on port ${port} did not stop within 3 s`);
+    await Bun.sleep(100);
+  }
+  return "stopped";
+}
+
+const OLD_DAEMON = "The running page server is an older version and cannot be stopped by command; it exits by itself when idle.";
+
+async function stop(args: string[]): Promise<number> {
+  const port = portOf(args, loadConfig());
+  const result = await stopDaemon(port);
+  if (result === "stopped") console.log(`page server on port ${port} stopped`);
+  else if (result === "old") console.log(OLD_DAEMON);
+  else console.log(`no page server is running on port ${port}`);
+  return 0;
+}
+
 function foreignPortError(port: number): Error {
   return new Error(`port ${port} is used by another program; set "port" in ${configFile()} or pass --port`);
 }
@@ -193,7 +219,7 @@ function openBrowser(url: string): void {
 }
 
 /** One-time setup: slash commands for Claude Code, or the labeler model in config.json. */
-function setup(args: string[]): number {
+async function setup(args: string[]): Promise<number> {
   const [what, ...rest] = args;
   if (what === "claude") {
     console.log(setupClaude().join("\n"));
@@ -219,7 +245,9 @@ function setup(args: string[]): number {
     }
     const file = writeLabeler(labeler);
     console.log(labeler ? `labeler set to ${labeler.provider} / ${labeler.model} in ${file}` : `labeler turned off in ${file}`);
-    console.log("A running page server keeps its old setting until it restarts (it exits after its idle time).");
+    const stopped = await stopDaemon(portOf(rest, loadConfig()));
+    if (stopped === "stopped") console.log("Page server stopped; it starts with the new setting the next time you open a graph.");
+    else if (stopped === "old") console.log(OLD_DAEMON);
     return 0;
   }
   console.error(USAGE);
@@ -227,9 +255,11 @@ function setup(args: string[]): number {
 }
 
 /** Removes the Claude Code commands (and with --purge the config and stored graphs), then says what is left. */
-function uninstallAll(args: string[]): number {
+async function uninstallAll(args: string[]): Promise<number> {
   const purge = args.includes("--purge");
+  const stopped = await stopDaemon(portOf(args, loadConfig()));
   const done = uninstall(purge);
+  if (stopped === "stopped") done.unshift("stopped the page server");
   console.log(done.length > 0 ? done.join("\n") : "nothing to remove");
   if (!purge) console.log("Config and stored graphs were kept; pass --purge to delete them too.");
   console.log("Last steps, to remove the program itself:");
@@ -251,9 +281,11 @@ async function main(argv: string[]): Promise<number> {
       case "log":
         return await log(rest);
       case "setup":
-        return setup(rest);
+        return await setup(rest);
+      case "stop":
+        return await stop(rest);
       case "uninstall":
-        return uninstallAll(rest);
+        return await uninstallAll(rest);
       default:
         console.error(USAGE);
         return 2;

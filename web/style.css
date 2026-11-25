@@ -495,13 +495,21 @@ html, body {
   top: 0;
   left: 0;
   right: 0;
-  padding: 8px 14px;
+  height: var(--banner-h);
+  line-height: var(--banner-h);
+  padding: 0 14px;
   background: var(--danger-bg);
   color: var(--danger-text);
   border-bottom: 1px solid var(--danger);
   font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   z-index: 12;
 }
+/* The banner is one fixed-height line (full text in its tooltip), so the timeline can start below it. */
+#viewport { --banner-h: 32px; }
+#viewport:has(#banner:not([hidden])) #timeline { top: var(--banner-h); }
 #toast {
   position: absolute;
   top: 12px;

@@ -3,7 +3,7 @@ import { appendFileSync, copyFileSync, mkdirSync, writeFileSync } from "node:fs"
 import http from "node:http";
 import { join, basename } from "node:path";
 import { type Config, loadConfig } from "../src/config";
-import { APP, type Daemon, startDaemon } from "../src/server";
+import { APP, type Daemon, STOP_HEADER, startDaemon } from "../src/server";
 import { type FakeLabeler, startFakeLabeler } from "./fake-labeler";
 import { FIXTURE, FIXTURE_ID, isolate, waitFor } from "./support";
 
@@ -157,6 +157,17 @@ describe("daemon", () => {
   test("a request whose Host header is not loopback gets 403", async () => {
     daemon = startDaemon({ config, port: 0, onIdle: () => {} });
     expect(await rawGet(daemon.port, "/health", "evil.example")).toBe(403);
+  });
+
+  test("POST /stop closes the server only with the stop header", async () => {
+    let exited = false;
+    daemon = startDaemon({ config, port: 0, onIdle: () => (exited = true) });
+    const url = `http://127.0.0.1:${daemon.port}/stop`;
+    expect((await fetch(url, { method: "POST" })).status).toBe(403);
+    expect((await fetch(url, { headers: { [STOP_HEADER]: "1" } })).status).toBe(403);
+    expect((await fetch(url, { method: "POST", headers: { [STOP_HEADER]: "1" } })).status).toBe(200);
+    await waitFor(() => exited, 1000);
+    await expect(fetch(`http://127.0.0.1:${daemon.port}/health`)).rejects.toThrow();
   });
 
   test("an unknown session key or harness gets 404 on page and stream routes", async () => {

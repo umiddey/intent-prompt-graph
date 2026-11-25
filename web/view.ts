@@ -572,6 +572,7 @@ export function paintChrome(s: State, els: Els): void {
 
   els.banner.hidden = s.connected && !s.labelerError;
   els.banner.textContent = s.connected ? `Labeler error: ${s.labelerError ?? ""}` : "Connection lost. Reconnecting…";
+  els.banner.title = els.banner.textContent;
 
   const latest = followTarget(s.graph);
   const unseen = !s.follow && latest !== undefined && latest.id !== s.seenNodeId;

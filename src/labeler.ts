@@ -480,7 +480,10 @@ async function extractViaClaudeCli(
     ]);
     if (timedOut) throw new Error(`claude-cli timed out after ${TIMEOUT_MS}ms`);
     if (exitCode !== 0) {
-      const detail = (stderr.trim() || stdout.trim()).slice(0, 240);
+      // `claude -p` prints the real cause (login, billing) as its result on stdout, while stderr
+      // often starts with unrelated warnings. Show the end of both, cause first.
+      const tail = (s: string) => s.trim().split("\n").filter((l) => l.trim()).slice(-2).join(" ");
+      const detail = [tail(stdout), tail(stderr)].filter(Boolean).join(" | ").slice(0, 300);
       throw new Error(`claude-cli exited ${exitCode}: ${detail}`);
     }
     if (!stdout.trim()) throw new Error("claude-cli returned empty output");

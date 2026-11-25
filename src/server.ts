@@ -5,6 +5,11 @@ import type { ServerEvent } from "./model";
 import { openSession, type Session } from "./session";
 
 export const APP = "intent-prompt-graph";
+/**
+ * `ipg stop` sends this header with POST /stop. A web page cannot add a custom header to a
+ * cross-site request without a CORS preflight, which this server never approves.
+ */
+export const STOP_HEADER = "x-ipg-stop";
 /** A session pipeline stops this long after its last SSE client leaves. */
 const LINGER_MS = 60_000;
 const PAGE = join(import.meta.dir, "../web/index.html");
@@ -21,7 +26,10 @@ export interface Daemon {
   stop(): void;
 }
 
-/** Loopback HTTP daemon: the page, the SSE event stream, and a health check. */
+/**
+ * Loopback HTTP daemon: the page, the SSE event stream, a health check, and POST /stop.
+ * `onIdle` runs after the idle timeout, and after a stop request once the server has closed.
+ */
 export function startDaemon(opts: { config: Config; port: number; onIdle: () => void }): Daemon {
   const { config } = opts;
   const pipelines = new Map<string, Pipeline>();
@@ -112,6 +120,15 @@ export function startDaemon(opts: { config: Config; port: number; onIdle: () => 
       if (!hostAllowed(req.headers.get("host"), srv.port ?? 0)) return new Response("forbidden", { status: 403 });
       const { pathname } = new URL(req.url);
       if (pathname === "/health") return Response.json({ app: APP });
+      if (pathname === "/stop") {
+        if (req.method !== "POST" || req.headers.get(STOP_HEADER) !== "1") return new Response("forbidden", { status: 403 });
+        // Reply first; close on the next tick so `ipg stop` gets its answer.
+        setTimeout(() => {
+          daemon.stop();
+          opts.onIdle();
+        });
+        return new Response("stopping");
+      }
       const events = /^\/api\/s\/([^/]+)\/([^/]+)\/events$/.exec(pathname);
       if (events) return sse(req, srv, events[1] ?? "", events[2] ?? "");
       const page = /^\/s\/([^/]+)\/([^/]+)$/.exec(pathname);
@@ -122,7 +139,7 @@ export function startDaemon(opts: { config: Config; port: number; onIdle: () => 
     },
   });
 
-  return {
+  const daemon: Daemon = {
     port: server.port ?? opts.port,
     stop() {
       clearTimeout(idle);
@@ -130,6 +147,7 @@ export function startDaemon(opts: { config: Config; port: number; onIdle: () => 
       for (const [id, p] of pipelines) forget(id, p);
     },
   };
+  return daemon;
 }
 
 async function resolveRef(harnessId: string, key: string): Promise<{ harness: Harness; ref: SessionRef } | undefined> {

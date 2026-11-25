@@ -537,3 +537,19 @@ describe("parseGraphOutput mergeInto", () => {
     expect(g).toEqual(graph());
   });
 });
+
+describe("claude-cli failure message", () => {
+  test("shows the cause claude printed on stdout ahead of stderr noise", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ipg-cli-"));
+    const script = join(dir, "fail.sh");
+    writeFileSync(script, "#!/bin/sh\necho 'Warning: old config' >&2\necho 'more noise' >&2\necho 'Your subscription payment is past due'\nexit 1\n");
+    chmodSync(script, 0o755);
+    try {
+      await expect(
+        extractGraph({ provider: "claude-cli", model: "haiku", command: script }, { turns: [] }, new Map()),
+      ).rejects.toThrow("claude-cli exited 1: Your subscription payment is past due | Warning: old config more noise");
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
+  });
+});

@@ -33,10 +33,13 @@ ipg setup labeler --provider openai --base-url https://api.example.com/v1 --mode
 ipg setup labeler --off
 ```
 
+Changing the labeler stops a running page server, so the next graph you open
+uses the new model. `ipg stop` stops it by hand.
+
 Uninstall:
 
 ```sh
-ipg uninstall            # removes the Claude Code commands; --purge also deletes the config and stored graphs
+ipg uninstall            # stops the page server, removes the Claude Code commands; --purge also deletes the config and stored graphs
 omp plugin uninstall intent-prompt-graph
 bun remove -g intent-prompt-graph
 ```

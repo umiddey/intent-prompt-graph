@@ -43,7 +43,8 @@ function headOf(file: string): Head {
       } catch {
         continue;
       }
-      if (obj.type === "title" && typeof obj.title === "string") head.title = obj.title;
+      // OMP prefixes titles with a private-use icon character that only its own terminal font can draw.
+      if (obj.type === "title" && typeof obj.title === "string") head.title = obj.title.replace(/\p{Co}/gu, "").trim();
       if (obj.type === "session") {
         head.id = obj.id as string;
         head.cwd = obj.cwd as string;
