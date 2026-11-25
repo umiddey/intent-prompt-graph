@@ -1,14 +1,19 @@
 #!/usr/bin/env bun
+import { writeFileSync } from "node:fs";
 import { configFile, type Config, loadConfig } from "./config";
-import { harnessById } from "./harness/harness";
+import { renderDecisionLog } from "./export";
+import { type Harness, harnessById, type SessionRef } from "./harness/harness";
+import { buildHeuristicGraph } from "./heuristic";
 import type { Turn } from "./model";
 import { APP, startDaemon } from "./server";
+import { openStore } from "./store";
 import { tailJsonl } from "./tail";
 
 const USAGE = [
   "usage: ipg turns --harness omp --session-file <file.jsonl>",
   "       ipg serve [--port N]",
   "       ipg open [--harness omp] [--session-file <file.jsonl>] [--no-browser] [--port N]",
+  "       ipg log [--harness omp] [--session-file <file.jsonl>] [--rejected] [--out <file.md>]",
 ].join("\n");
 
 // The reader closed the pipe (e.g. `| head`): exit quietly, as other Unix tools do.
@@ -34,16 +39,8 @@ function portOf(args: string[], config: Config): number {
   return value === undefined ? config.port : parsePort(value);
 }
 
-/** Prints the final turn list, one JSON object per line, in first-appearance order. */
-async function turns(args: string[]): Promise<number> {
-  const harness = harnessById(flag(args, "--harness") ?? "");
-  const sessionFile = flag(args, "--session-file");
-  if (!harness || !sessionFile) {
-    console.error(USAGE);
-    return 2;
-  }
-  const config = loadConfig();
-  const ref = await harness.locate({ sessionFile, cwd: process.cwd() });
+/** Reads the whole session file once and returns its turns in first-appearance order. */
+async function readTurns(harness: Harness, ref: SessionRef, config: Config): Promise<Turn[]> {
   let reader = harness.reader(ref, { config });
   const byId = new Map<string, Turn>();
   await tailJsonl(
@@ -58,7 +55,52 @@ async function turns(args: string[]): Promise<number> {
     },
     { follow: false },
   );
-  for (const t of byId.values()) process.stdout.write(`${JSON.stringify(t)}\n`);
+  return [...byId.values()];
+}
+
+/** Finds the session from --session-file, else from the terminal breadcrumb or the working directory. */
+async function locateSession(harness: Harness, args: string[]): Promise<SessionRef> {
+  return harness.locate({
+    sessionFile: flag(args, "--session-file"),
+    tty: await ttyName(),
+    cwd: process.cwd(),
+  });
+}
+
+/** Prints the final turn list, one JSON object per line, in first-appearance order. */
+async function turns(args: string[]): Promise<number> {
+  const harness = harnessById(flag(args, "--harness") ?? "");
+  const sessionFile = flag(args, "--session-file");
+  if (!harness || !sessionFile) {
+    console.error(USAGE);
+    return 2;
+  }
+  const ref = await harness.locate({ sessionFile, cwd: process.cwd() });
+  for (const t of await readTurns(harness, ref, loadConfig())) process.stdout.write(`${JSON.stringify(t)}\n`);
+  return 0;
+}
+
+/**
+ * Prints the decision log of a session as markdown, or writes it to --out.
+ * Reads the stored LLM graph when there is one, else builds the heuristic outline from the
+ * session file. Never starts the daemon and never calls the labeler.
+ */
+async function log(args: string[]): Promise<number> {
+  const harness = harnessById(flag(args, "--harness") ?? "omp");
+  const out = flag(args, "--out");
+  if (!harness || (args.includes("--out") && !out)) {
+    console.error(USAGE);
+    return 2;
+  }
+  const ref = await locateSession(harness, args);
+  const stored = openStore(harness.id, ref.key).graph;
+  const graph =
+    stored && stored.nodes.length > 0
+      ? stored
+      : buildHeuristicGraph(await readTurns(harness, ref, loadConfig()), ref.title);
+  const text = renderDecisionLog(graph, args.includes("--rejected") ? { only: "rejected" } : undefined);
+  if (out) writeFileSync(out, text);
+  else process.stdout.write(text);
   return 0;
 }
 
@@ -78,11 +120,7 @@ async function open(args: string[]): Promise<number> {
   }
   const config = loadConfig();
   const port = portOf(args, config);
-  const ref = await harness.locate({
-    sessionFile: flag(args, "--session-file"),
-    tty: await ttyName(),
-    cwd: process.cwd(),
-  });
+  const ref = await locateSession(harness, args);
   await ensureDaemon(port);
   const url = `http://127.0.0.1:${port}/s/${harness.id}/${ref.key}#latest`;
   console.log(url);
@@ -159,6 +197,8 @@ async function main(argv: string[]): Promise<number> {
         return await serve(rest);
       case "open":
         return await open(rest);
+      case "log":
+        return await log(rest);
       default:
         console.error(USAGE);
         return 2;

@@ -24,7 +24,7 @@ Do not edit `src/labeler.ts`, `src/session.ts`, `src/heuristic.ts`, `src/store.t
 ## Phases
 
 ### Phase 1: Markdown renderer (`src/export.ts`)
-**Status**: OPEN
+**Status**: DONE
 - Pure function `renderDecisionLog(graph: SessionGraph, opts?: { only?: "rejected" }): string`.
 - Full log layout:
   - `# <graph title>`
@@ -39,7 +39,7 @@ Do not edit `src/labeler.ts`, `src/session.ts`, `src/heuristic.ts`, `src/store.t
 - Text from nodes is collapsed to one line per bullet (no raw newlines breaking the list).
 
 ### Phase 2: CLI command `ipg log`
-**Status**: OPEN
+**Status**: DONE
 - `ipg log [--harness omp] [--session-file <file.jsonl>] [--rejected] [--out <file.md>]`. Add it to `USAGE`.
 - Locate the session like `open` does (`harness.locate`, tty fallback).
 - Graph source: `openStore(harness.id, ref.key).graph` when it has nodes; otherwise read all turns once (as the `turns` command does) and call `buildHeuristicGraph`.
@@ -47,14 +47,14 @@ Do not edit `src/labeler.ts`, `src/session.ts`, `src/heuristic.ts`, `src/store.t
 - `--rejected` with nothing rejected prints nothing and exits 0.
 
 ### Phase 3: OMP commands
-**Status**: OPEN
+**Status**: DONE
 - Extend `integrations/omp/types.d.ts` with `pasteToEditor(text: string): void` on `ExtensionUIContext` (it exists in the real API).
 - `/graph-log`: runs `ipg log --harness omp --session-file <file> --out <tmp path>` and notifies the path. Tmp path under `os.tmpdir()`, named after the session key.
 - `/graph-rejected`: runs `ipg log … --rejected`; pastes the output into the editor with `ctx.ui.pasteToEditor` so the owner reviews and sends it. When the output is empty, notify "Nothing rejected yet".
 - Same error handling as the existing `/graph` command (warning when the session is not saved, error notify on CLI failure). Keep shelling out to `ipg` on PATH; do not import daemon code.
 
 ### Phase 4: Tests and docs
-**Status**: OPEN
+**Status**: DONE
 - `test/export.test.ts`: full log for a graph with every kind; empty sections omitted; `only: "rejected"` output and its empty case; multi-line rationale stays one bullet.
 - `test/cli.test.ts`: `ipg log` on the fixture session under `test/fixtures/omp` prints a log with a Goal section (heuristic path, no store); `--rejected` exits 0.
 - `README.md`: add a short "Decision log" section (`ipg log`, `/graph-log`, `/graph-rejected`). Another change is editing README at the same time: re-read the file right before editing and only add the new section.

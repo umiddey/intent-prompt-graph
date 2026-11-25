@@ -4,9 +4,12 @@
 
 export interface ExtensionUIContext {
   notify(message: string, type?: "info" | "warning" | "error"): void;
+  /** Pastes text into the input editor; the owner still has to send it. */
+  pasteToEditor(text: string): void;
 }
 
 export interface ReadonlySessionManager {
+  getSessionId(): string;
   getSessionFile(): string | undefined;
 }
 

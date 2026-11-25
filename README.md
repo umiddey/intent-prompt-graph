@@ -34,6 +34,34 @@ daemon code. A session that is not saved to disk gets a warning instead of a
 graph. The plugin entry is the `omp.extensions` field of `package.json`
 (`integrations/omp/intent-graph.ts`).
 
+## Decision log
+
+`ipg log` prints the record under the graph as markdown: the goal, what was
+chosen, what was rejected and why, the decisions and the loops.
+
+```sh
+ipg log [--harness omp] [--session-file <file.jsonl>] [--rejected] [--out <file.md>]
+```
+
+- It reads the graph the labeler already stored for the session. When there is
+  none it builds the basic outline from the session file. The last line of the
+  log says which one you got. It does not start the daemon and calls no model.
+- Without `--session-file` it finds the session of the current terminal, as
+  `ipg open` does.
+- `--out` writes the log to a file instead of printing it.
+- `--rejected` prints only the rejected paths, as a short block to paste into
+  an agent prompt so the agent does not propose them again. Options that were
+  laid out but never rejected are left out of this block. It prints nothing
+  when nothing was rejected.
+
+In OMP:
+
+- `/graph-log` writes the log to `ipg-log-<session id>.md` in the system temp
+  directory and shows the path. Hand that file to a new session instead of the
+  old conversation.
+- `/graph-rejected` pastes the rejected block into the input editor. You review
+  it and send it yourself. When nothing was rejected it says so.
+
 ## Config
 
 Optional file: `$XDG_CONFIG_HOME/intent-prompt-graph/config.json`, or
