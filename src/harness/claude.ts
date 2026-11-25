@@ -22,8 +22,9 @@ const WRAPPER_RE = /^\s*<[a-z][\w-]*[\s>]/;
 /** Marker Claude Code writes when the owner pressed Esc. */
 const INTERRUPT_RE = /^\[Request interrupted by user[^\]]*\]/;
 
-function claudeDir(): string {
-  return process.env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
+/** Claude Code's config directory: `CLAUDE_CONFIG_DIR`, else `~/.claude`. */
+export function claudeDir(env: NodeJS.ProcessEnv = process.env): string {
+  return env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude");
 }
 
 function projectsDir(): string {

@@ -1,11 +1,12 @@
 #!/usr/bin/env bun
 import { writeFileSync } from "node:fs";
-import { configFile, type Config, loadConfig } from "./config";
+import { configFile, type Config, type LabelerConfig, loadConfig } from "./config";
 import { renderDecisionLog } from "./export";
 import { type Harness, harnessById, type SessionRef } from "./harness/harness";
 import { buildHeuristicGraph } from "./heuristic";
 import type { Turn } from "./model";
 import { APP, startDaemon } from "./server";
+import { setupClaude, uninstall, writeLabeler } from "./setup";
 import { openStore } from "./store";
 import { tailJsonl } from "./tail";
 
@@ -14,6 +15,10 @@ const USAGE = [
   "       ipg serve [--port N]",
   "       ipg open [--harness omp|claude] [--session-file <file.jsonl>] [--no-browser] [--port N]",
   "       ipg log [--harness omp|claude] [--session-file <file.jsonl>] [--rejected] [--out <file.md>]",
+  "       ipg setup claude",
+  "       ipg setup labeler --provider claude-cli|openai --model <name> [--base-url <url>] [--api-key-env <VAR>] [--command <path>]",
+  "       ipg setup labeler --off",
+  "       ipg uninstall [--purge]",
 ].join("\n");
 
 // The reader closed the pipe (e.g. `| head`): exit quietly, as other Unix tools do.
@@ -187,6 +192,52 @@ function openBrowser(url: string): void {
   }
 }
 
+/** One-time setup: slash commands for Claude Code, or the labeler model in config.json. */
+function setup(args: string[]): number {
+  const [what, ...rest] = args;
+  if (what === "claude") {
+    console.log(setupClaude().join("\n"));
+    console.log("Restart Claude Code to load the commands.");
+    return 0;
+  }
+  if (what === "labeler") {
+    let labeler: LabelerConfig | undefined;
+    if (!rest.includes("--off")) {
+      const provider = flag(rest, "--provider");
+      if (provider !== "claude-cli" && provider !== "openai") {
+        throw new Error("--provider must be claude-cli or openai (or pass --off)");
+      }
+      labeler = { provider };
+      const model = flag(rest, "--model");
+      const baseUrl = flag(rest, "--base-url");
+      const apiKeyEnv = flag(rest, "--api-key-env");
+      const command = flag(rest, "--command");
+      if (model) labeler.model = model;
+      if (baseUrl) labeler.baseUrl = baseUrl;
+      if (apiKeyEnv) labeler.apiKeyEnv = apiKeyEnv;
+      if (command) labeler.command = command;
+    }
+    const file = writeLabeler(labeler);
+    console.log(labeler ? `labeler set to ${labeler.provider} / ${labeler.model} in ${file}` : `labeler turned off in ${file}`);
+    console.log("A running page server keeps its old setting until it restarts (it exits after its idle time).");
+    return 0;
+  }
+  console.error(USAGE);
+  return 2;
+}
+
+/** Removes the Claude Code commands (and with --purge the config and stored graphs), then says what is left. */
+function uninstallAll(args: string[]): number {
+  const purge = args.includes("--purge");
+  const done = uninstall(purge);
+  console.log(done.length > 0 ? done.join("\n") : "nothing to remove");
+  if (!purge) console.log("Config and stored graphs were kept; pass --purge to delete them too.");
+  console.log("Last steps, to remove the program itself:");
+  console.log("  omp plugin uninstall intent-prompt-graph   # only if you installed the OMP plugin");
+  console.log("  bun remove -g intent-prompt-graph");
+  return 0;
+}
+
 async function main(argv: string[]): Promise<number> {
   const [cmd, ...rest] = argv;
   try {
@@ -199,6 +250,10 @@ async function main(argv: string[]): Promise<number> {
         return await open(rest);
       case "log":
         return await log(rest);
+      case "setup":
+        return setup(rest);
+      case "uninstall":
+        return uninstallAll(rest);
       default:
         console.error(USAGE);
         return 2;

@@ -15,8 +15,30 @@ Three parts in one npm package:
 ## Install
 
 ```sh
-bun add -g intent-prompt-graph     # puts `ipg` on PATH
-omp plugin install intent-prompt-graph   # adds /ipg to OMP
+bun add -g intent-prompt-graph           # puts `ipg` on PATH
+omp plugin install intent-prompt-graph   # OMP: adds /ipg
+ipg setup claude                         # Claude Code: adds /ipg
+```
+
+Needs [Bun](https://bun.sh) 1.0 or later. The package has no runtime
+dependencies. The labeler is optional and needs either the `claude` command or
+an OpenAI-compatible endpoint.
+
+Pick the model that draws the real graph (this writes the `labeler` section of
+the [config](#config); run it again any time to change it):
+
+```sh
+ipg setup labeler --provider claude-cli --model haiku
+ipg setup labeler --provider openai --base-url https://api.example.com/v1 --model example-model --api-key-env IPG_LABELER_KEY
+ipg setup labeler --off
+```
+
+Uninstall:
+
+```sh
+ipg uninstall            # removes the Claude Code commands; --purge also deletes the config and stored graphs
+omp plugin uninstall intent-prompt-graph
+bun remove -g intent-prompt-graph
 ```
 
 From a checkout instead:
@@ -60,13 +82,10 @@ slash-command and `!` shell wrappers, system reminders, task notifications,
 compaction summaries and subagent conversations do not.
 
 The slash commands are the files `integrations/claude/commands/*.md` of this
-package. Copy or link them into your Claude Code commands directory (or into
-`.claude/commands/` of one project). From a checkout:
-
-```sh
-mkdir -p ~/.claude/commands
-ln -s "$PWD"/integrations/claude/commands/*.md ~/.claude/commands/
-```
+package. `ipg setup claude` links them into your Claude Code commands
+directory (`~/.claude/commands/`, or `$CLAUDE_CONFIG_DIR/commands/`). A file of
+the same name that is not its own link is left alone. To use them in one
+project only, link the files into that project's `.claude/commands/` yourself.
 
 - `/ipg` runs `ipg open --harness claude` and replies with the URL.
 - `/ipg-log` writes the decision log to `/tmp/ipg-log-<session id>.md` and
