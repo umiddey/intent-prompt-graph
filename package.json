@@ -1,6 +1,6 @@
 {
   "name": "intent-prompt-graph",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "A live browser graph of a coding-agent conversation, grouped by intent. Standalone `ipg` CLI plus plugins for OMP and Claude Code that add /ipg.",
   "keywords": [
     "ai-agents",

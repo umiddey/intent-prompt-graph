@@ -309,9 +309,10 @@ stage.addEventListener(
 
 // Pointer drag pan.
 let press: { id: number; x: number; y: number; lastX: number; lastY: number; moving: boolean } | undefined;
+// A drag released off the stage fires no click, so any new press anywhere clears the flag.
+document.addEventListener("pointerdown", () => (dragged = false), true);
 stage.addEventListener("pointerdown", (e) => {
   if (e.button !== 0 || (e.target instanceof Element && e.target.closest(".node"))) return;
-  dragged = false;
   press = { id: e.pointerId, x: e.clientX, y: e.clientY, lastX: e.clientX, lastY: e.clientY, moving: false };
 });
 stage.addEventListener("pointermove", (e) => {
@@ -332,6 +333,16 @@ const endPress = (): void => {
 };
 stage.addEventListener("pointerup", endPress);
 stage.addEventListener("pointercancel", endPress);
+
+// The graph keeps fitting the window as it is resized (one refit per frame).
+let resizeFrame = 0;
+window.addEventListener("resize", () => {
+  if (state.viewMode !== "graph" || resizeFrame) return;
+  resizeFrame = requestAnimationFrame(() => {
+    resizeFrame = 0;
+    glideFit();
+  });
+});
 
 const route = /^\/s\/([^/]+)\/([^/]+)$/.exec(location.pathname);
 if (!route) throw new Error("ipg: not a session page");
