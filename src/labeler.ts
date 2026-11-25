@@ -392,6 +392,9 @@ async function extractViaClaudeCli(
       "--model",
       cfg.model,
       "--no-session-persistence",
+      // No user/project/local settings: the owner's CLAUDE.md, hooks and "language" must not shape the graph.
+      "--setting-sources",
+      "",
       "--tools",
       "",
       "--system-prompt",
