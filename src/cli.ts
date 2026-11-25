@@ -10,10 +10,10 @@ import { openStore } from "./store";
 import { tailJsonl } from "./tail";
 
 const USAGE = [
-  "usage: ipg turns --harness omp --session-file <file.jsonl>",
+  "usage: ipg turns --harness omp|claude --session-file <file.jsonl>",
   "       ipg serve [--port N]",
-  "       ipg open [--harness omp] [--session-file <file.jsonl>] [--no-browser] [--port N]",
-  "       ipg log [--harness omp] [--session-file <file.jsonl>] [--rejected] [--out <file.md>]",
+  "       ipg open [--harness omp|claude] [--session-file <file.jsonl>] [--no-browser] [--port N]",
+  "       ipg log [--harness omp|claude] [--session-file <file.jsonl>] [--rejected] [--out <file.md>]",
 ].join("\n");
 
 // The reader closed the pipe (e.g. `| head`): exit quietly, as other Unix tools do.
@@ -58,7 +58,7 @@ async function readTurns(harness: Harness, ref: SessionRef, config: Config): Pro
   return [...byId.values()];
 }
 
-/** Finds the session from --session-file, else from the terminal breadcrumb or the working directory. */
+/** Finds the session from --session-file, else the way the harness finds its running session. */
 async function locateSession(harness: Harness, args: string[]): Promise<SessionRef> {
   return harness.locate({
     sessionFile: flag(args, "--session-file"),

@@ -12,6 +12,7 @@ import {
   revealView,
   stepSelection,
   summarizeGraph,
+  transcriptHtml,
   type State,
   type View,
 } from "../web/view";
@@ -221,5 +222,12 @@ describe("graph view framing", () => {
     const moved = revealView(v, wide.get("n14")!, VW, VH);
     expect(moved.z).toBe(v.z);
     expect(cardInside(moved, wide.get("n14")!, VW, VH)).toBe(true);
+  });
+});
+
+describe("transcript markdown", () => {
+  test("renders bold, code and image tags, and still escapes everything else", () => {
+    const html = transcriptHtml('**Use** `ipg log` <img src="/x.webp" alt="Paper theme"> <script>x</script>');
+    expect(html).toBe("<b>Use</b> <code>ipg log</code> [image: Paper theme] &lt;script&gt;x&lt;/script&gt;");
   });
 });

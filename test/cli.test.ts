@@ -138,7 +138,7 @@ describe("cli", () => {
     try {
       const { stdout, stderr, code } = await runLog("--out");
       expect(stdout).toBe("");
-      expect(stderr).toContain("ipg log [--harness omp]");
+      expect(stderr).toContain("ipg log [--harness omp|claude]");
       expect(code).toBe(2);
     } finally {
       iso.restore();

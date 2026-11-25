@@ -80,6 +80,21 @@ function esc(s: string): string {
   return s.replace(/[&<>"']/g, (ch) => ENTITIES[ch] ?? ch);
 }
 
+/**
+ * Escapes transcript text and renders the little markdown agents write: `**bold**`, `` `code` ``,
+ * `# headings`, and `<img alt="…">` tags (shown as "[image: …]"). Everything else stays plain text.
+ */
+export function transcriptHtml(text: string): string {
+  return esc(text)
+    .replace(/&lt;img\b[^\n]*?&gt;/g, (tag) => {
+      const alt = /alt=&quot;(.*?)&quot;/.exec(tag)?.[1];
+      return alt ? `[image: ${alt}]` : "[image]";
+    })
+    .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>")
+    .replace(/^#{1,6} +(.+)$/gm, "<b>$1</b>");
+}
+
 /** Replaces an element's content only when it changed, so scroll position and hover survive repaints. */
 function setHtml(el: Element, html: string): void {
   if (painted.get(el) === html) return;
@@ -512,7 +527,7 @@ export function paintInspector(s: State, els: Els): void {
             return (
               `<div class="turn-card">` +
               `<div class="turn-who"><span>${whoLabel}</span><span>${esc(clock(t.at))}</span></div>` +
-              `<div class="turn-body">${esc(t.text || "(tool calls only)")}</div>` +
+              `<div class="turn-body">${transcriptHtml(t.text || "(tool calls only)")}</div>` +
               actionsHtml +
               `</div>`
             );

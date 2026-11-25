@@ -6,10 +6,11 @@ Without a `labeler` you get a basic outline, not the real decision graph: node t
 
 ## What it is
 
-Two parts in one npm package:
+Three parts in one npm package:
 
-- `ipg`: a standalone CLI and local daemon (needs [Bun](https://bun.sh)). Works from any shell.
+- `ipg`: a standalone CLI and local daemon (needs [Bun](https://bun.sh)). Works from any shell. It reads sessions of two harnesses: OMP (`--harness omp`, the default) and Claude Code (`--harness claude`).
 - An OMP plugin that adds the `/ipg` slash command (a thin wrapper around `ipg open`).
+- Claude Code slash commands that do the same there (see [Claude Code](#claude-code)).
 
 ## Install
 
@@ -34,13 +35,57 @@ daemon code. A session that is not saved to disk gets a warning instead of a
 graph. The plugin entry is the `omp.extensions` field of `package.json`
 (`integrations/omp/intent-graph.ts`).
 
+## Claude Code
+
+`ipg` reads Claude Code sessions with `--harness claude`:
+
+```sh
+ipg open --harness claude          # the session of this terminal or directory
+ipg log --harness claude --session-file ~/.claude/projects/<project>/<session id>.jsonl
+```
+
+Without `--session-file` it finds the session in two steps:
+
+1. It walks up its own parent processes. A running Claude Code process records
+   its session id in `~/.claude/sessions/<pid>.json`, so when `ipg` is started
+   from inside Claude Code (a slash command or the Bash tool) it gets exactly
+   that session.
+2. Otherwise it takes the newest session of the current directory under
+   `~/.claude/projects/`.
+
+`CLAUDE_CONFIG_DIR` replaces `~/.claude` when it is set, as in Claude Code.
+
+A message becomes an owner turn only when the owner wrote it. Tool output,
+slash-command and `!` shell wrappers, system reminders, task notifications,
+compaction summaries and subagent conversations do not.
+
+The slash commands are the files `integrations/claude/commands/*.md` of this
+package. Copy or link them into your Claude Code commands directory (or into
+`.claude/commands/` of one project). From a checkout:
+
+```sh
+mkdir -p ~/.claude/commands
+ln -s "$PWD"/integrations/claude/commands/*.md ~/.claude/commands/
+```
+
+- `/ipg` runs `ipg open --harness claude` and replies with the URL.
+- `/ipg-log` writes the decision log to `/tmp/ipg-log-<session id>.md` and
+  replies with the path.
+- `/ipg-rejected` puts the rejected paths into the conversation, so the agent
+  does not propose them again. When nothing was rejected it says so.
+
+Each command runs `ipg` before the model sees the prompt and then costs one
+short model reply. A brand-new session has no file on disk until its first
+message is sent, so the commands report an error when they are the very first
+thing typed.
+
 ## Decision log
 
 `ipg log` prints the record under the graph as markdown: the goal, what was
 chosen, what was rejected and why, the decisions and the loops.
 
 ```sh
-ipg log [--harness omp] [--session-file <file.jsonl>] [--rejected] [--out <file.md>]
+ipg log [--harness omp|claude] [--session-file <file.jsonl>] [--rejected] [--out <file.md>]
 ```
 
 - It reads the graph the labeler already stored for the session. When there is
@@ -61,6 +106,8 @@ In OMP:
   old conversation.
 - `/ipg-rejected` pastes the rejected block into the input editor. You review
   it and send it yourself. When nothing was rejected it says so.
+
+In Claude Code the same two commands exist; see [Claude Code](#claude-code).
 
 ## Config
 

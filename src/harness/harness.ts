@@ -1,5 +1,6 @@
 import type { Config } from "../config";
 import type { Turn } from "../model";
+import { claude } from "./claude";
 import { omp } from "./omp";
 
 export interface SessionRef {
@@ -22,7 +23,7 @@ export interface Harness {
   reader(ref: SessionRef, opts: { config: Config }): Reader;
 }
 
-export const harnesses = { omp } as const;
+export const harnesses = { omp, claude } as const;
 export type HarnessId = keyof typeof harnesses;
 
 /** Own-property lookup, so ids such as "toString" are not harnesses. */

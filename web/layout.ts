@@ -71,8 +71,11 @@ const KIND_PRIORITY: Record<NodeKind, number> = {
 
 /**
  * Computes collision-free top-left (x, y) coordinates for every node in a Decision & Path Graph.
- * Places the main decision spine left-to-right across topological columns while stacking
- * rejected, unchosen option, and side-question branches cleanly below their parent column.
+ * Columns follow time along the spine: a spine node is never placed left of a spine node that
+ * happened before it. A node sits one column right of its parent (same column for a side question);
+ * a node with no earlier parent starts after the latest spine node instead of restarting at the far
+ * left. Rejected, unchosen option, and side-question branches stay beside the node they branch from
+ * and stack below the spine in their column.
  *
  * Args:
  *     nodes (readonly GraphNode[]): Graph nodes to place.
@@ -85,43 +88,32 @@ export function layoutGraph(nodes: readonly GraphNode[], edges: readonly GraphEd
   const pos = new Map<string, Point>();
   if (nodes.length === 0) return pos;
 
-  const byId = new Map(nodes.map((n) => [n.id, n] as const));
-  const outgoing = new Map<string, GraphEdge[]>();
-  const inDegree = new Map<string, number>();
-  for (const n of nodes) {
-    outgoing.set(n.id, []);
-    inDegree.set(n.id, 0);
-  }
+  const orderIndex = new Map(nodes.map((n, i) => [n.id, i] as const));
+  const incoming = new Map<string, GraphEdge[]>();
   for (const e of edges) {
-    if (!byId.has(e.from) || !byId.has(e.to) || e.from === e.to) continue;
-    outgoing.get(e.from)?.push(e);
-    if (e.kind !== "side") {
-      inDegree.set(e.to, (inDegree.get(e.to) ?? 0) + 1);
-    }
+    if (!orderIndex.has(e.from) || !orderIndex.has(e.to) || e.from === e.to) continue;
+    const list = incoming.get(e.to) ?? [];
+    list.push(e);
+    incoming.set(e.to, list);
   }
 
-  // Assign topological column (layer) via bounded relaxation so cycles cannot loop forever.
+  // Walk the nodes oldest first. Only parents already placed constrain a node, so an edge that
+  // points back in time (or closes a cycle) cannot pull anything left.
+  const byTime = [...nodes].sort((a, b) => a.at - b.at || (orderIndex.get(a.id) ?? 0) - (orderIndex.get(b.id) ?? 0));
   const layer = new Map<string, number>();
-  for (const n of nodes) layer.set(n.id, 0);
-
-  const maxPasses = Math.min(nodes.length, 64);
-  for (let pass = 0; pass < maxPasses; pass++) {
-    let changed = false;
-    for (const e of edges) {
-      if (!byId.has(e.from) || !byId.has(e.to) || e.from === e.to) continue;
-      const fromL = layer.get(e.from) ?? 0;
-      const toL = layer.get(e.to) ?? 0;
-      if (e.kind === "side") {
-        if (toL < fromL) {
-          layer.set(e.to, fromL);
-          changed = true;
-        }
-      } else if (toL < fromL + 1) {
-        layer.set(e.to, fromL + 1);
-        changed = true;
-      }
+  let spineMax = 0;
+  for (const n of byTime) {
+    let col = -1;
+    for (const e of incoming.get(n.id) ?? []) {
+      const fromL = layer.get(e.from);
+      if (fromL === undefined) continue;
+      col = Math.max(col, e.kind === "side" ? fromL : fromL + 1);
     }
-    if (!changed) break;
+    const spine = isSpineKind(n.kind);
+    if (col < 0) col = layer.size === 0 ? 0 : spine ? spineMax + 1 : spineMax;
+    else if (spine) col = Math.max(col, spineMax);
+    layer.set(n.id, col);
+    if (spine) spineMax = col;
   }
 
   // Group nodes into columns and sort each column so the main spine stays on row 0.
@@ -133,7 +125,6 @@ export function layoutGraph(nodes: readonly GraphNode[], edges: readonly GraphEd
     columns.set(col, list);
   }
 
-  const orderIndex = new Map(nodes.map((n, i) => [n.id, i] as const));
   for (const [col, list] of columns) {
     list.sort((a, b) => {
       const pDiff = KIND_PRIORITY[a.kind] - KIND_PRIORITY[b.kind];

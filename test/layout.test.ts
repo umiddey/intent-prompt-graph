@@ -242,3 +242,20 @@ describe("edge labels", () => {
     expect(edgePath(pos.get("goal")!, pos.get("aside")!).vertical).toBe(true);
   });
 });
+
+describe("graph columns follow time", () => {
+  test("a topic with no link to earlier cards starts right of them, not at the far left", () => {
+    const at = (id: string, kind: NodeKind, t: number): GraphNode => ({ ...node(id, kind), at: t });
+    // Two chains that the labeler did not link: a→b→c, then a new topic d→e that starts after b.
+    const nodes = [at("a", "goal", 1), at("b", "chosen", 2), at("d", "decision", 3), at("c", "chosen", 4), at("e", "chosen", 5)];
+    const edges: GraphEdge[] = [
+      { id: "e1", from: "a", to: "b", kind: "chosen" },
+      { id: "e2", from: "b", to: "c", kind: "chosen" },
+      { id: "e3", from: "d", to: "e", kind: "chosen" },
+    ];
+    const pos = layoutGraph(nodes, edges);
+    const xs = ["a", "b", "d", "c", "e"].map((id) => pos.get(id)!.x);
+    expect(xs[2]!).toBeGreaterThan(xs[1]!);
+    for (let i = 1; i < xs.length; i++) expect(xs[i]!).toBeGreaterThanOrEqual(xs[i - 1]!);
+  });
+});
