@@ -9,13 +9,13 @@ Without a `labeler` you get a basic outline, not the real decision graph: node t
 Two parts in one npm package:
 
 - `ipg`: a standalone CLI and local daemon (needs [Bun](https://bun.sh)). Works from any shell.
-- An OMP plugin that adds the `/graph` slash command (a thin wrapper around `ipg open`).
+- An OMP plugin that adds the `/ipg` slash command (a thin wrapper around `ipg open`).
 
 ## Install
 
 ```sh
 bun add -g intent-prompt-graph     # puts `ipg` on PATH
-omp plugin install intent-prompt-graph   # adds /graph to OMP
+omp plugin install intent-prompt-graph   # adds /ipg to OMP
 ```
 
 From a checkout instead:
@@ -23,12 +23,12 @@ From a checkout instead:
 ```sh
 bun install
 bun link                           # `ipg` on PATH
-omp plugin link "$PWD"             # /graph in OMP
+omp plugin link "$PWD"             # /ipg in OMP
 ```
 
 ## OMP integration
 
-`/graph` runs `ipg open --harness omp --session-file <file>` for the current
+`/ipg` runs `ipg open --harness omp --session-file <file>` for the current
 session and prints the URL. It calls the `ipg` CLI on PATH and does not import
 daemon code. A session that is not saved to disk gets a warning instead of a
 graph. The plugin entry is the `omp.extensions` field of `package.json`
@@ -56,10 +56,10 @@ ipg log [--harness omp] [--session-file <file.jsonl>] [--rejected] [--out <file.
 
 In OMP:
 
-- `/graph-log` writes the log to `ipg-log-<session id>.md` in the system temp
+- `/ipg-log` writes the log to `ipg-log-<session id>.md` in the system temp
   directory and shows the path. Hand that file to a new session instead of the
   old conversation.
-- `/graph-rejected` pastes the rejected block into the input editor. You review
+- `/ipg-rejected` pastes the rejected block into the input editor. You review
   it and send it yourself. When nothing was rejected it says so.
 
 ## Config

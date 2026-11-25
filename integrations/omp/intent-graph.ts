@@ -39,14 +39,14 @@ function command(
 }
 
 export default function (pi: ExtensionAPI): void {
-  pi.registerCommand("graph", {
+  pi.registerCommand("ipg", {
     description: "Open the intent graph of this session in the browser",
     handler: command("ipg open", async (sessionFile, ctx) => {
       const lines = (await runIpg("open", sessionFile)).trim().split("\n");
       ctx.ui.notify(lines[lines.length - 1] ?? "", "info");
     }),
   });
-  pi.registerCommand("graph-log", {
+  pi.registerCommand("ipg-log", {
     description: "Write the decision log of this session to a markdown file",
     handler: command("ipg log", async (sessionFile, ctx) => {
       const out = join(tmpdir(), `ipg-log-${ctx.sessionManager.getSessionId()}.md`);
@@ -54,7 +54,7 @@ export default function (pi: ExtensionAPI): void {
       ctx.ui.notify(out, "info");
     }),
   });
-  pi.registerCommand("graph-rejected", {
+  pi.registerCommand("ipg-rejected", {
     description: "Paste the paths rejected in this session into the editor",
     handler: command("ipg log", async (sessionFile, ctx) => {
       const block = (await runIpg("log", sessionFile, ["--rejected"])).trim();
