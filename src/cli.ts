@@ -199,7 +199,10 @@ async function stopDaemon(port: number): Promise<"stopped" | "none" | "old"> {
   const key = state === "ours" ? daemonToken() : "1";
   const res = await fetch(`http://127.0.0.1:${port}/stop`, { method: "POST", headers: { [STOP_HEADER]: key } });
   if (res.status === 404) return "old";
-  if (!res.ok) throw new Error(`page server on port ${port} refused to stop (${res.status})`);
+  if (!res.ok)
+    throw new Error(
+      `page server on port ${port} refused to stop (${res.status}): it was started with a different key. Stop it by hand, then try again: pkill -f "serve --port ${port}"`,
+    );
   const deadline = Date.now() + 3000;
   while ((await health(port)) !== "none") {
     if (Date.now() >= deadline) throw new Error(`page server on port ${port} did not stop within 3 s`);
