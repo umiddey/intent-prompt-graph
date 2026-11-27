@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { configFile, type Config, type LabelerConfig, loadConfig } from "./config";
@@ -8,7 +8,7 @@ import { type Harness, harnessById, type SessionRef } from "./harness/harness";
 import { buildHeuristicGraph } from "./heuristic";
 import type { Turn } from "./model";
 import { APP, STOP_HEADER, startDaemon } from "./server";
-import { setupClaude, uninstall, updatePlan, writeLabeler } from "./setup";
+import { setupClaude, stateDir, uninstall, updatePlan, writeLabeler } from "./setup";
 import { openStore } from "./store";
 import { tailJsonl } from "./tail";
 
@@ -16,7 +16,7 @@ const USAGE = [
   "usage: ipg turns --harness omp|claude --session-file <file.jsonl>",
   "       ipg serve [--port N]",
   "       ipg open [--harness omp|claude] [--session-file <file.jsonl>] [--no-browser] [--port N]",
-  "       ipg log [--harness omp|claude] [--session-file <file.jsonl>] [--rejected] [--out <file.md>]",
+  "       ipg log [--harness omp|claude] [--session-file <file.jsonl>] [--rejected] [--out <file.md> | --save]",
   "       ipg setup claude",
   "       ipg setup labeler --provider claude-cli|openai --model <name> [--base-url <url>] [--api-key-env <VAR>] [--command <path>]",
   "       ipg setup labeler --off",
@@ -90,7 +90,8 @@ async function turns(args: string[]): Promise<number> {
 }
 
 /**
- * Prints the decision log of a session as markdown, or writes it to --out.
+ * Prints the decision log of a session as markdown, writes it to --out, or with --save writes it
+ * to a private file under the state directory and prints that path.
  * Reads the stored LLM graph when there is one, else builds the heuristic outline from the
  * session file. Never starts the daemon and never calls the labeler.
  */
@@ -108,7 +109,15 @@ async function log(args: string[]): Promise<number> {
       ? stored
       : buildHeuristicGraph(await readTurns(harness, ref, loadConfig()), ref.title);
   const text = renderDecisionLog(graph, args.includes("--rejected") ? { only: "rejected" } : undefined);
-  if (out) writeFileSync(out, text);
+  if (args.includes("--save")) {
+    // Not /tmp: the log holds session content, and the file name holds the session id.
+    const dir = join(stateDir(), "logs");
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const file = join(dir, `${harness.id}-${ref.key}.md`);
+    writeFileSync(file, text, { mode: 0o600 });
+    chmodSync(file, 0o600);
+    console.log(file);
+  } else if (out) writeFileSync(out, text);
   else process.stdout.write(text);
   return 0;
 }

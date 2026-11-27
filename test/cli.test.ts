@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { SessionGraph } from "../src/model";
 import { storeFile } from "../src/store";
@@ -140,6 +140,38 @@ describe("cli", () => {
       expect(stdout).toBe("");
       expect(stderr).toContain("ipg log [--harness omp|claude]");
       expect(code).toBe(2);
+    } finally {
+      iso.restore();
+    }
+  });
+
+  test("ipg log --save writes a file only the owner can read and prints its path", async () => {
+    const iso = isolate();
+    try {
+      const { stdout, code } = await runLog("--save");
+      expect(code).toBe(0);
+      const file = stdout.trim();
+      expect(file).toBe(join(iso.root, "state/intent-prompt-graph/logs", `omp-${FIXTURE_ID}.md`));
+      expect(readFileSync(file, "utf8")).toStartWith("# Fixture session\n");
+      expect(statSync(file).mode & 0o777).toBe(0o600);
+      expect(statSync(dirname(file)).mode & 0o777).toBe(0o700);
+    } finally {
+      iso.restore();
+    }
+  });
+
+  test("a session file whose id is a path is refused, so it cannot name a store file elsewhere", async () => {
+    const iso = isolate();
+    try {
+      const evil = join(iso.root, "evil.jsonl");
+      writeFileSync(evil, `${JSON.stringify({ type: "session", id: "../../../x", cwd: "/tmp/proj" })}\n`);
+      const proc = Bun.spawn(["bun", CLI, "log", "--harness", "omp", "--session-file", evil], {
+        env: process.env,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(await proc.exited).toBe(1);
+      expect(await new Response(proc.stderr).text()).toContain("no OMP session header");
     } finally {
       iso.restore();
     }

@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { SessionGraph } from "./model";
@@ -114,8 +114,13 @@ export function openStore(harness: string, key: string, env: NodeJS.ProcessEnv =
         processedTurnIds: [...processedTurnIds],
       };
       const out = `${needsNewline ? "\n" : ""}${JSON.stringify(record)}\n`;
-      mkdirSync(dirname(file), { recursive: true });
-      appendFileSync(file, out);
+      // Graphs summarize private sessions: only the owner may read them, also when the
+      // directory and file were created by a version that left them world-readable.
+      const dir = dirname(file);
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      appendFileSync(file, out, { mode: 0o600 });
+      for (const path of [dirname(dir), dir]) chmodSync(path, 0o700);
+      chmodSync(file, 0o600);
       needsNewline = false;
     },
   };

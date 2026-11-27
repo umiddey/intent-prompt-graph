@@ -113,8 +113,8 @@ the same name that is not its own link is left alone. To use them in one
 project only, link the files into that project's `.claude/commands/` yourself.
 
 - `/ipg` runs `ipg open --harness claude` and replies with the URL.
-- `/ipg-log` writes the decision log to `/tmp/ipg-log-<session id>.md` and
-  replies with the path.
+- `/ipg-log` writes the decision log to a private file (see `--save` under
+  [Decision log](#decision-log)) and replies with the path.
 - `/ipg-rejected` puts the rejected paths into the conversation, so the agent
   does not propose them again. When nothing was rejected it says so.
 
@@ -129,7 +129,7 @@ thing typed.
 chosen, what was rejected and why, the decisions and the loops.
 
 ```sh
-ipg log [--harness omp|claude] [--session-file <file.jsonl>] [--rejected] [--out <file.md>]
+ipg log [--harness omp|claude] [--session-file <file.jsonl>] [--rejected] [--out <file.md> | --save]
 ```
 
 - It reads the graph the labeler already stored for the session. When there is
@@ -138,6 +138,9 @@ ipg log [--harness omp|claude] [--session-file <file.jsonl>] [--rejected] [--out
 - Without `--session-file` it finds the session of the current terminal, as
   `ipg open` does.
 - `--out` writes the log to a file instead of printing it.
+- `--save` writes it to `logs/<harness>-<session id>.md` in the state
+  directory (`~/.local/state/intent-prompt-graph`), readable only by you, and
+  prints the path.
 - `--rejected` prints only the rejected paths, as a short block to paste into
   an agent prompt so the agent does not propose them again. Options that were
   laid out but never rejected are left out of this block. It prints nothing
@@ -145,9 +148,8 @@ ipg log [--harness omp|claude] [--session-file <file.jsonl>] [--rejected] [--out
 
 In OMP:
 
-- `/ipg-log` writes the log to `ipg-log-<session id>.md` in the system temp
-  directory and shows the path. Hand that file to a new session instead of the
-  old conversation.
+- `/ipg-log` saves the log with `--save` and shows the path. Hand that file to
+  a new session instead of the old conversation.
 - `/ipg-rejected` pastes the rejected block into the input editor. You review
   it and send it yourself. When nothing was rejected it says so.
 
@@ -196,6 +198,8 @@ The labeler sends the conversation to the endpoint you configure, or to the loca
 - owner messages, truncated to 800 characters;
 - agent messages, truncated to 1200 characters;
 - tool use as counts per tool name, not tool output;
+- up to 400 characters of the harness text that started an agent turn with no owner message (for example a background-task notice);
+- the session title and the time of each turn;
 - guest messages replaced by the placeholder `[guest message withheld]`;
 - after the first batch, an outline of the graph so far (node ids, kinds, titles and chapter names, edge endpoints and kinds), so the model replies with only what changed.
 

@@ -58,7 +58,8 @@ function headOf(file: string): Head {
 
 function refOf(file: string): SessionRef {
   const head = headOf(file);
-  if (!head.id || !head.cwd) throw new Error(`no OMP session header in ${file}`);
+  // The key becomes a file name in the store and part of the page URL.
+  if (!head.id || !head.cwd || !KEY_RE.test(head.id)) throw new Error(`no OMP session header in ${file}`);
   return { harness: "omp", key: head.id, file, cwd: head.cwd, title: head.title };
 }
 

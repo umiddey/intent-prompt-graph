@@ -493,7 +493,7 @@ export function paintGraph(s: State, els: Els): GraphLayout {
     }
     const cls = [
       "node",
-      `kind-${n.kind}`,
+      `kind-${esc(n.kind)}`,
       `grp-${colorGroup(n.kind)}`,
       n.id === selId && "selected",
       n.id === latestId && "latest",
@@ -533,7 +533,7 @@ function rowHtml(row: TimelineRow, selId: string | undefined, latestId: string |
   const n = row.node;
   const cls = [
     "tl-row",
-    `kind-${n.kind}`,
+    `kind-${esc(n.kind)}`,
     `grp-${colorGroup(n.kind)}`,
     n.id === selId && "selected",
     n.id === latestId && "latest",
@@ -543,7 +543,7 @@ function rowHtml(row: TimelineRow, selId: string | undefined, latestId: string |
   const via = row.edge?.label ? `<div class="tl-via">${esc(row.edge.label)}</div>` : "";
   const rounds =
     n.kind === "loop" && n.rounds !== undefined
-      ? `<div class="tl-rounds"><b>${n.rounds}</b><span>rounds</span></div>`
+      ? `<div class="tl-rounds"><b>${Number(n.rounds)}</b><span>rounds</span></div>`
       : "";
   const latest = n.id === latestId ? `<span class="tl-latest">latest</span>` : "";
   const desc = n.desc ? `<div class="tl-desc">${esc(n.desc)}</div>` : "";

@@ -1,6 +1,4 @@
 import { execFile } from "node:child_process";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "./types";
 
 // Type-only import: Bun erases it, so the file loads with no runtime dependency on types.d.ts.
@@ -49,9 +47,7 @@ export default function (pi: ExtensionAPI): void {
   pi.registerCommand("ipg-log", {
     description: "Write the decision log of this session to a markdown file",
     handler: command("ipg log", async (sessionFile, ctx) => {
-      const out = join(tmpdir(), `ipg-log-${ctx.sessionManager.getSessionId()}.md`);
-      await runIpg("log", sessionFile, ["--out", out]);
-      ctx.ui.notify(out, "info");
+      ctx.ui.notify((await runIpg("log", sessionFile, ["--save"])).trim(), "info");
     }),
   });
   pi.registerCommand("ipg-rejected", {

@@ -1,6 +1,6 @@
 ---
 description: Open the decision graph of this session in the browser
-allowed-tools: Bash(ipg open:*)
+allowed-tools: Bash(ipg open --harness claude)
 ---
 
 Output of `ipg open` for this session:
