@@ -74,6 +74,16 @@ Two views of the same session: **Timeline** (a list, top to bottom) and
 
 Without a labeler there are no chapter names; the graph still wraps.
 
+### Who can open the page
+
+Only a browser you opened it in. `ipg open` (and `/ipg`) open the page with a
+one-time link; after that the plain address works in that browser, also after
+a restart of the page server. Any other program or browser gets `403`.
+
+- `ipg open --no-browser` prints the one-time link. It works once, within 2 minutes.
+- The key is the file `~/.local/state/intent-prompt-graph/token` (readable only
+  by you). `ipg uninstall --purge` deletes it.
+
 ## OMP integration
 
 `/ipg` runs `ipg open --harness omp --session-file <file>` for the current

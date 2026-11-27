@@ -3,7 +3,7 @@ import { appendFileSync, copyFileSync, mkdirSync, writeFileSync } from "node:fs"
 import http from "node:http";
 import { join, basename } from "node:path";
 import { type Config, loadConfig } from "../src/config";
-import { APP, type Daemon, STOP_HEADER, startDaemon } from "../src/server";
+import { APP, type Daemon, KEY_HEADER, STOP_HEADER, cookieName, healthProof, startDaemon } from "../src/server";
 import { type FakeLabeler, startFakeLabeler } from "./fake-labeler";
 import { FIXTURE, FIXTURE_ID, isolate, waitFor } from "./support";
 
@@ -56,13 +56,13 @@ interface Stream {
 }
 
 /** Reads an SSE response in the background; each complete `data:` frame becomes one entry in lines. */
-function openStream(url: string): Stream {
+function openStream(url: string, headers: Record<string, string>): Stream {
   const lines: string[] = [];
   const ctrl = new AbortController();
   const decoder = new TextDecoder();
   let buf = "";
   void (async () => {
-    const res = await fetch(url, { signal: ctrl.signal });
+    const res = await fetch(url, { signal: ctrl.signal, headers });
     if (!res.body) return;
     for await (const chunk of res.body) {
       buf += decoder.decode(chunk, { stream: true });
@@ -97,6 +97,9 @@ describe("daemon", () => {
   let config: Config;
   let file: string;
   const streams: Stream[] = [];
+  const TOKEN = "a".repeat(64);
+  const start = (): Daemon => startDaemon({ config, port: 0, token: TOKEN, onIdle: () => {} });
+  const auth = (): Record<string, string> => ({ cookie: `${cookieName(daemon?.port ?? 0)}=${TOKEN}` });
 
   beforeEach(() => {
     iso = isolate();
@@ -122,23 +125,48 @@ describe("daemon", () => {
     iso.restore();
   });
 
-  test("the session page is served as HTML", async () => {
-    daemon = startDaemon({ config, port: 0, onIdle: () => {} });
-    const res = await fetch(`http://127.0.0.1:${daemon.port}/s/omp/${FIXTURE_ID}`);
+  test("the session page is served as HTML to a browser that holds the token cookie, and to nobody else", async () => {
+    daemon = start();
+    const url = `http://127.0.0.1:${daemon.port}/s/omp/${FIXTURE_ID}`;
+    const res = await fetch(url, { headers: auth() });
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("text/html");
+
+    expect((await fetch(url)).status).toBe(403);
+    expect((await fetch(url, { headers: { cookie: `${cookieName(daemon.port)}=${"0".repeat(64)}` } })).status).toBe(403);
+    expect((await fetch(`http://127.0.0.1:${daemon.port}/api/s/omp/${FIXTURE_ID}/events`)).status).toBe(403);
   });
 
-  test("/health identifies the app", async () => {
-    daemon = startDaemon({ config, port: 0, onIdle: () => {} });
-    const res = await fetch(`http://127.0.0.1:${daemon.port}/health`);
-    expect(await res.json()).toEqual({ app: APP });
+  test("a ticket opens the page once: it sets the cookie, then stops working", async () => {
+    daemon = start();
+    const base = `http://127.0.0.1:${daemon.port}`;
+    expect((await fetch(`${base}/ticket`, { method: "POST" })).status).toBe(403);
+    expect((await fetch(`${base}/ticket`, { method: "POST", headers: { [KEY_HEADER]: "1" } })).status).toBe(403);
+    const issued = (await (await fetch(`${base}/ticket`, { method: "POST", headers: { [KEY_HEADER]: TOKEN } })).json()) as { ticket: string };
+
+    const page = `${base}/s/omp/${FIXTURE_ID}?k=${issued.ticket}`;
+    const first = await fetch(page, { redirect: "manual" });
+    expect(first.status).toBe(302);
+    expect(first.headers.get("location")).toBe(`/s/omp/${FIXTURE_ID}`);
+    const cookie = (first.headers.get("set-cookie") ?? "").split(";")[0] ?? "";
+    expect((await fetch(`${base}/s/omp/${FIXTURE_ID}`, { headers: { cookie } })).status).toBe(200);
+
+    expect((await fetch(page, { redirect: "manual" })).status).toBe(403);
+    expect((await fetch(`${base}/s/omp/${FIXTURE_ID}?k=guess`, { redirect: "manual" })).status).toBe(403);
+  });
+
+  test("/health identifies the app, and proves it holds the token when given a nonce", async () => {
+    daemon = start();
+    const base = `http://127.0.0.1:${daemon.port}/health`;
+    expect(await (await fetch(base)).json()).toEqual({ app: APP });
+    expect(await (await fetch(`${base}?n=abc`)).json()).toEqual({ app: APP, proof: healthProof(TOKEN, "abc") });
+    expect(healthProof("another token", "abc")).not.toBe(healthProof(TOKEN, "abc"));
   });
 
   test("the event stream opens with a snapshot, then delivers a new owner turn and an updated graph", async () => {
-    daemon = startDaemon({ config, port: 0, onIdle: () => {} });
+    daemon = start();
     const base = `http://127.0.0.1:${daemon.port}`;
-    const stream = openStream(`${base}/api/s/omp/${FIXTURE_ID}/events`);
+    const stream = openStream(`${base}/api/s/omp/${FIXTURE_ID}/events`, auth());
     streams.push(stream);
     await waitFor(() => stream.lines.length > 0);
     expect(stream.lines[0]).toContain('"type":"snapshot"');
@@ -155,27 +183,28 @@ describe("daemon", () => {
   });
 
   test("a request whose Host header is not loopback gets 403", async () => {
-    daemon = startDaemon({ config, port: 0, onIdle: () => {} });
+    daemon = start();
     expect(await rawGet(daemon.port, "/health", "evil.example")).toBe(403);
   });
 
-  test("POST /stop closes the server only with the stop header", async () => {
+  test("POST /stop closes the server only with the token in the stop header", async () => {
     let exited = false;
-    daemon = startDaemon({ config, port: 0, onIdle: () => (exited = true) });
+    daemon = startDaemon({ config, port: 0, token: TOKEN, onIdle: () => (exited = true) });
     const url = `http://127.0.0.1:${daemon.port}/stop`;
     expect((await fetch(url, { method: "POST" })).status).toBe(403);
-    expect((await fetch(url, { headers: { [STOP_HEADER]: "1" } })).status).toBe(403);
-    expect((await fetch(url, { method: "POST", headers: { [STOP_HEADER]: "1" } })).status).toBe(200);
+    expect((await fetch(url, { method: "POST", headers: { [STOP_HEADER]: "1" } })).status).toBe(403);
+    expect((await fetch(url, { headers: { [STOP_HEADER]: TOKEN } })).status).toBe(403);
+    expect((await fetch(url, { method: "POST", headers: { [STOP_HEADER]: TOKEN } })).status).toBe(200);
     await waitFor(() => exited, 1000);
     await expect(fetch(`http://127.0.0.1:${daemon.port}/health`)).rejects.toThrow();
   });
 
   test("an unknown session key or harness gets 404 on page and stream routes", async () => {
-    daemon = startDaemon({ config, port: 0, onIdle: () => {} });
+    daemon = start();
     const base = `http://127.0.0.1:${daemon.port}`;
-    expect((await fetch(`${base}/s/omp/no-such-session`)).status).toBe(404);
-    expect((await fetch(`${base}/s/bogus/${FIXTURE_ID}`)).status).toBe(404);
-    expect((await fetch(`${base}/api/s/omp/no-such-session/events`)).status).toBe(404);
+    expect((await fetch(`${base}/s/omp/no-such-session`, { headers: auth() })).status).toBe(404);
+    expect((await fetch(`${base}/s/bogus/${FIXTURE_ID}`, { headers: auth() })).status).toBe(404);
+    expect((await fetch(`${base}/api/s/omp/no-such-session/events`, { headers: auth() })).status).toBe(404);
   });
 
   test("the daemon process exits on its own once the idle window passes with no clients", async () => {

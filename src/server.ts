@@ -1,3 +1,4 @@
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { join } from "node:path";
 import type { Config } from "./config";
 import { type Harness, harnessById, type SessionRef } from "./harness/harness";
@@ -6,10 +7,15 @@ import { openSession, type Session } from "./session";
 
 export const APP = "intent-prompt-graph";
 /**
- * `ipg stop` sends this header with POST /stop. A web page cannot add a custom header to a
- * cross-site request without a CORS preflight, which this server never approves.
+ * `ipg stop` sends the daemon token in this header with POST /stop. A web page cannot add a custom
+ * header to a cross-site request without a CORS preflight, which this server never approves.
  */
 export const STOP_HEADER = "x-ipg-stop";
+/** `ipg open` sends the daemon token in this header with POST /ticket. */
+export const KEY_HEADER = "x-ipg-key";
+/** A ticket opens the page once, within this time of being issued. */
+const TICKET_MS = 120_000;
+const NO_KEY = "This page needs a key. Run `ipg open --no-browser` in a terminal and use the link it prints.\n";
 /** A session pipeline stops this long after its last SSE client leaves. */
 const LINGER_MS = 60_000;
 const PAGE = join(import.meta.dir, "../web/index.html");
@@ -26,12 +32,42 @@ export interface Daemon {
   stop(): void;
 }
 
+/** What /health answers to a nonce: only a daemon that holds the token can compute it. */
+export function healthProof(token: string, nonce: string): string {
+  return createHmac("sha256", token).update(nonce).digest("hex");
+}
+
+/** Name of the cookie that holds the token; cookies are shared across ports, so the port is in the name. */
+export function cookieName(port: number): string {
+  return `ipg_${port}`;
+}
+
+function same(a: string, b: string): boolean {
+  const x = Buffer.from(a);
+  const y = Buffer.from(b);
+  return x.length === y.length && timingSafeEqual(x, y);
+}
+
+function cookieOf(req: Request, name: string): string {
+  for (const part of (req.headers.get("cookie") ?? "").split(";")) {
+    const eq = part.indexOf("=");
+    if (eq > 0 && part.slice(0, eq).trim() === name) return part.slice(eq + 1).trim();
+  }
+  return "";
+}
+
 /**
- * Loopback HTTP daemon: the page, the SSE event stream, a health check, and POST /stop.
+ * Loopback HTTP daemon: the page, the SSE event stream, a health check, POST /ticket and POST /stop.
  * `onIdle` runs after the idle timeout, and after a stop request once the server has closed.
+ *
+ * Session content is served only to a browser that holds `token` in a cookie. `ipg open` gets the
+ * cookie into the browser with a ticket: POST /ticket (token in a header) returns a random key
+ * that the page URL carries as `?k=`; it works once, and the reply sets the cookie.
  */
-export function startDaemon(opts: { config: Config; port: number; onIdle: () => void }): Daemon {
-  const { config } = opts;
+export function startDaemon(opts: { config: Config; port: number; token: string; onIdle: () => void }): Daemon {
+  const { config, token } = opts;
+  /** Unused tickets and when they expire. */
+  const tickets = new Map<string, number>();
   const pipelines = new Map<string, Pipeline>();
   let clients = 0;
   let idle: Timer | undefined;
@@ -118,10 +154,22 @@ export function startDaemon(opts: { config: Config; port: number; onIdle: () => 
     hostname: "127.0.0.1",
     fetch(req, srv) {
       if (!hostAllowed(req.headers.get("host"), srv.port ?? 0)) return new Response("forbidden", { status: 403 });
-      const { pathname } = new URL(req.url);
-      if (pathname === "/health") return Response.json({ app: APP });
+      const url = new URL(req.url);
+      const { pathname } = url;
+      if (pathname === "/health") {
+        const nonce = url.searchParams.get("n");
+        return Response.json(nonce ? { app: APP, proof: healthProof(token, nonce) } : { app: APP });
+      }
+      if (pathname === "/ticket") {
+        if (req.method !== "POST" || !same(req.headers.get(KEY_HEADER) ?? "", token)) return new Response("forbidden", { status: 403 });
+        const now = Date.now();
+        for (const [t, expires] of tickets) if (expires <= now) tickets.delete(t);
+        const ticket = randomBytes(24).toString("hex");
+        tickets.set(ticket, now + TICKET_MS);
+        return Response.json({ ticket });
+      }
       if (pathname === "/stop") {
-        if (req.method !== "POST" || req.headers.get(STOP_HEADER) !== "1") return new Response("forbidden", { status: 403 });
+        if (req.method !== "POST" || !same(req.headers.get(STOP_HEADER) ?? "", token)) return new Response("forbidden", { status: 403 });
         // Reply first; close on the next tick so `ipg stop` gets its answer.
         setTimeout(() => {
           daemon.stop();
@@ -129,9 +177,22 @@ export function startDaemon(opts: { config: Config; port: number; onIdle: () => 
         });
         return new Response("stopping");
       }
+      const cookie = cookieName(srv.port ?? 0);
       const events = /^\/api\/s\/([^/]+)\/([^/]+)\/events$/.exec(pathname);
-      if (events) return sse(req, srv, events[1] ?? "", events[2] ?? "");
       const page = /^\/s\/([^/]+)\/([^/]+)$/.exec(pathname);
+      const ticket = url.searchParams.get("k");
+      if (page && ticket !== null) {
+        const expires = tickets.get(ticket);
+        tickets.delete(ticket);
+        if (expires === undefined || expires <= Date.now()) return new Response(NO_KEY, { status: 403 });
+        // Lax, not Strict: the link may be clicked in another site (a chat page) and must still open.
+        return new Response(null, {
+          status: 302,
+          headers: { location: pathname, "set-cookie": `${cookie}=${token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=31536000` },
+        });
+      }
+      if ((events || page) && !same(cookieOf(req, cookie), token)) return new Response(NO_KEY, { status: 403 });
+      if (events) return sse(req, srv, events[1] ?? "", events[2] ?? "");
       if (page) return pageFor(page[1] ?? "", page[2] ?? "");
       const asset = /^\/_web\/([^/]+)$/.exec(pathname);
       if (asset) return assetFor(asset[1] ?? "");

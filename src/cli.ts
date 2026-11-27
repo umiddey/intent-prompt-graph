@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { randomBytes } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -7,8 +8,8 @@ import { renderDecisionLog } from "./export";
 import { type Harness, harnessById, type SessionRef } from "./harness/harness";
 import { buildHeuristicGraph } from "./heuristic";
 import type { Turn } from "./model";
-import { APP, STOP_HEADER, startDaemon } from "./server";
-import { setupClaude, stateDir, uninstall, updatePlan, writeLabeler } from "./setup";
+import { APP, healthProof, KEY_HEADER, STOP_HEADER, startDaemon } from "./server";
+import { daemonToken, setupClaude, stateDir, uninstall, updatePlan, writeLabeler } from "./setup";
 import { openStore } from "./store";
 import { tailJsonl } from "./tail";
 
@@ -125,11 +126,15 @@ async function log(args: string[]): Promise<number> {
 /** Runs the daemon in the foreground; it exits on its own after the idle window. */
 async function serve(args: string[]): Promise<number> {
   const config = loadConfig();
-  startDaemon({ config, port: portOf(args, config), onIdle: () => process.exit(0) });
+  startDaemon({ config, port: portOf(args, config), token: daemonToken(), onIdle: () => process.exit(0) });
   return 0;
 }
 
-/** Ensures a daemon is answering, then prints the session URL. */
+/**
+ * Ensures a daemon is answering, then opens the session page. The page needs a key, a link that
+ * works once: the browser is started with it and the plain URL is printed (it works in that
+ * browser from then on). With --no-browser the link with the key is printed instead.
+ */
 async function open(args: string[]): Promise<number> {
   const harness = harnessById(flag(args, "--harness") ?? "omp");
   if (!harness) {
@@ -140,9 +145,19 @@ async function open(args: string[]): Promise<number> {
   const port = portOf(args, config);
   const ref = await locateSession(harness, args);
   await ensureDaemon(port);
-  const url = `http://127.0.0.1:${port}/s/${harness.id}/${ref.key}#latest`;
-  console.log(url);
-  if (!args.includes("--no-browser")) openBrowser(url);
+  const res = await fetch(`http://127.0.0.1:${port}/ticket`, { method: "POST", headers: { [KEY_HEADER]: daemonToken() } });
+  const body: unknown = res.ok ? await res.json() : undefined;
+  if (typeof body !== "object" || body === null || !("ticket" in body) || typeof body.ticket !== "string") {
+    throw new Error(`page server on port ${port} gave no page key (${res.status})`);
+  }
+  const page = `http://127.0.0.1:${port}/s/${harness.id}/${ref.key}`;
+  const keyed = `${page}?k=${body.ticket}#latest`;
+  if (args.includes("--no-browser")) {
+    console.log(keyed);
+  } else {
+    console.log(`${page}#latest`);
+    openBrowser(keyed);
+  }
   return 0;
 }
 
@@ -157,24 +172,32 @@ async function ttyName(): Promise<string | undefined> {
   }
 }
 
-type Health = "ours" | "foreign" | "none";
+/**
+ * "ours" proved it holds our token. "old" says it is this app but cannot prove it: a version from
+ * before the token, or a program posing as the page server.
+ */
+type Health = "ours" | "old" | "foreign" | "none";
 
 async function health(port: number): Promise<Health> {
+  const nonce = randomBytes(16).toString("hex");
   let res: Response;
   try {
-    res = await fetch(`http://127.0.0.1:${port}/health`, { signal: AbortSignal.timeout(500) });
+    res = await fetch(`http://127.0.0.1:${port}/health?n=${nonce}`, { signal: AbortSignal.timeout(500) });
   } catch {
     return "none";
   }
   const body: unknown = await res.json().catch(() => undefined);
-  const ours = res.ok && typeof body === "object" && body !== null && "app" in body && body.app === APP;
-  return ours ? "ours" : "foreign";
+  if (!res.ok || typeof body !== "object" || body === null || !("app" in body) || body.app !== APP) return "foreign";
+  return "proof" in body && body.proof === healthProof(daemonToken(), nonce) ? "ours" : "old";
 }
 
 /** Asks our daemon on the port to exit. "old" means it predates `ipg stop` and only exits by idling out. */
 async function stopDaemon(port: number): Promise<"stopped" | "none" | "old"> {
-  if ((await health(port)) !== "ours") return "none";
-  const res = await fetch(`http://127.0.0.1:${port}/stop`, { method: "POST", headers: { [STOP_HEADER]: "1" } });
+  const state = await health(port);
+  if (state !== "ours" && state !== "old") return "none";
+  // A page server from before the token takes "1".
+  const key = state === "ours" ? daemonToken() : "1";
+  const res = await fetch(`http://127.0.0.1:${port}/stop`, { method: "POST", headers: { [STOP_HEADER]: key } });
   if (res.status === 404) return "old";
   if (!res.ok) throw new Error(`page server on port ${port} refused to stop (${res.status})`);
   const deadline = Date.now() + 3000;
@@ -200,11 +223,15 @@ function foreignPortError(port: number): Error {
   return new Error(`port ${port} is used by another program; set "port" in ${configFile()} or pass --port`);
 }
 
-/** Starts a detached daemon when nothing answers on the port; refuses a foreign listener. */
+/**
+ * Starts a detached daemon when nothing answers on the port; refuses a foreign listener. A page
+ * server that cannot prove it holds our token is stopped and replaced, never trusted.
+ */
 async function ensureDaemon(port: number): Promise<void> {
   const first = await health(port);
   if (first === "ours") return;
   if (first === "foreign") throw foreignPortError(port);
+  if (first === "old" && (await stopDaemon(port)) !== "stopped") throw foreignPortError(port);
   Bun.spawn([process.execPath, import.meta.path, "serve", "--port", String(port)], {
     stdio: ["ignore", "ignore", "ignore"],
   }).unref();
@@ -216,7 +243,7 @@ async function awaitDaemon(port: number, deadline: number): Promise<void> {
   await Bun.sleep(100);
   const state = await health(port);
   if (state === "ours") return;
-  if (state === "foreign") throw foreignPortError(port);
+  if (state === "foreign" || state === "old") throw foreignPortError(port);
   if (Date.now() >= deadline) throw new Error(`daemon did not answer on port ${port} within 3 s`);
   return awaitDaemon(port, deadline);
 }

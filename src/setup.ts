@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -107,6 +108,43 @@ export function writeLabeler(labeler: LabelerConfig | undefined, env: NodeJS.Pro
 /** Directory holding the stored graphs of every session. */
 export function stateDir(env: NodeJS.ProcessEnv = process.env): string {
   return join(env.XDG_STATE_HOME || join(homedir(), ".local", "state"), "intent-prompt-graph");
+}
+
+/**
+ * Returns the secret the page server and the CLI share, creating it on first use. It lives in a
+ * file only the owner can read, so another account on the machine cannot ask the server for
+ * session content or stop it.
+ *
+ * Args:
+ *     env (NodeJS.ProcessEnv): Environment map for resolving the state directory.
+ *
+ * Returns:
+ *     string: 64 hex characters.
+ */
+export function daemonToken(env: NodeJS.ProcessEnv = process.env): string {
+  const file = join(stateDir(env), "token");
+  const read = (): string | undefined => {
+    try {
+      const text = readFileSync(file, "utf8").trim();
+      return /^[0-9a-f]{64}$/.test(text) ? text : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const have = read();
+  if (have) return have;
+  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
+  // A file that holds something else is replaced.
+  if (existsSync(file)) rmSync(file);
+  try {
+    // "wx": when two processes start at once, one creates the file and the other reads it.
+    writeFileSync(file, `${randomBytes(32).toString("hex")}\n`, { mode: 0o600, flag: "wx" });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+  }
+  const made = read();
+  if (!made) throw new Error(`could not create ${file}`);
+  return made;
 }
 
 /**
