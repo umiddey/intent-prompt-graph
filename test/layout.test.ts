@@ -1,6 +1,18 @@
 import { describe, expect, test } from "bun:test";
 import type { GraphEdge, GraphNode, NodeKind } from "../src/model";
-import { COL_GAP, edgePath, layoutGraph, NODE_H, NODE_W, pruneGraph, ROW_GAP, timelineRows } from "../web/layout";
+import {
+  BAND_HEAD,
+  chapterRuns,
+  COL_GAP,
+  edgeGeometry,
+  edgePath,
+  layoutGraph,
+  NODE_H,
+  NODE_W,
+  pruneGraph,
+  ROW_GAP,
+  timelineRows,
+} from "../web/layout";
 
 function node(id: string, kind: NodeKind = "decision"): GraphNode {
   return {
@@ -31,7 +43,7 @@ describe("layered DAG layout", () => {
       edges.push({ id: `e${i}`, from: parent, to: `n${i}`, kind });
     }
 
-    const pos = layoutGraph(nodes, edges);
+    const pos = layoutGraph(nodes, edges, undefined, 4).positions;
     expect(pos.size).toBe(120);
     const pts = [...pos.values()];
     for (let i = 0; i < pts.length; i++) {
@@ -48,7 +60,7 @@ describe("layered DAG layout", () => {
       { id: "e2", from: "g1", to: "rej", kind: "rejected" },
       { id: "e3", from: "g1", to: "win", kind: "chosen" },
     ];
-    const pos = layoutGraph(nodes, edges);
+    const pos = layoutGraph(nodes, edges, undefined, 6).positions;
     const pGoal = pos.get("g1")!;
     const pWin = pos.get("win")!;
     const pOpt = pos.get("opt")!;
@@ -62,7 +74,7 @@ describe("layered DAG layout", () => {
   test("places side questions in the same column below their parent and computes vertical edge paths", () => {
     const nodes = [node("d1", "decision"), node("s1", "side")];
     const edges: GraphEdge[] = [{ id: "e1", from: "d1", to: "s1", kind: "side" }];
-    const pos = layoutGraph(nodes, edges);
+    const pos = layoutGraph(nodes, edges, undefined, 6).positions;
     const pParent = pos.get("d1")!;
     const pSide = pos.get("s1")!;
 
@@ -79,7 +91,7 @@ describe("layered DAG layout", () => {
       { id: "e1", from: "a", to: "b", kind: "decision" },
       { id: "e2", from: "b", to: "a", kind: "decision" },
     ];
-    const pos = layoutGraph(nodes, edges);
+    const pos = layoutGraph(nodes, edges, undefined, 6).positions;
     expect(pos.size).toBe(2);
   });
 });
@@ -188,7 +200,7 @@ describe("filtered graph layout", () => {
       ["loop", "fin", "chosen", "owner corrects"],
     ]);
 
-    const pos = layoutGraph(slice.nodes, slice.edges);
+    const pos = layoutGraph(slice.nodes, slice.edges, undefined, 6).positions;
     expect(pos.size).toBe(5);
     // One connected row: columns 0 to 4 are each taken once, all on row 0.
     const step = NODE_W + COL_GAP;
@@ -222,7 +234,7 @@ describe("edge labels", () => {
     const { nodes, edges } = story();
     // A long edge that skips columns: its label must still clear the cards it passes.
     edges.push({ id: "long", from: "goal", to: "fin", kind: "chosen", label: "straight there" });
-    const pos = layoutGraph(nodes, edges);
+    const pos = layoutGraph(nodes, edges, undefined, 12).positions;
     const cards = [...pos.values()];
 
     for (const e of edges) {
@@ -243,7 +255,7 @@ describe("edge labels", () => {
   });
 });
 
-describe("graph columns follow time", () => {
+describe("graph columns follow the timeline", () => {
   test("a topic with no link to earlier cards starts right of them, not at the far left", () => {
     const at = (id: string, kind: NodeKind, t: number): GraphNode => ({ ...node(id, kind), at: t });
     // Two chains that the labeler did not link: a→b→c, then a new topic d→e that starts after b.
@@ -253,9 +265,91 @@ describe("graph columns follow time", () => {
       { id: "e2", from: "b", to: "c", kind: "chosen" },
       { id: "e3", from: "d", to: "e", kind: "chosen" },
     ];
-    const pos = layoutGraph(nodes, edges);
-    const xs = ["a", "b", "d", "c", "e"].map((id) => pos.get(id)!.x);
-    expect(xs[2]!).toBeGreaterThan(xs[1]!);
-    for (let i = 1; i < xs.length; i++) expect(xs[i]!).toBeGreaterThanOrEqual(xs[i - 1]!);
+    const pos = layoutGraph(nodes, edges, undefined, 6).positions;
+    // Same order as the timeline view: one column per card, the unlinked topic after the first chain.
+    const order = timelineRows(nodes, edges).map((r) => r.node.id);
+    expect(order.slice(0, 2)).toEqual(["a", "b"]);
+    const xs = order.map((id) => pos.get(id)!.x);
+    for (let i = 1; i < xs.length; i++) expect(xs[i]!).toBeGreaterThan(xs[i - 1]!);
+    expect(pos.get("d")!.x).toBeGreaterThan(pos.get("b")!.x);
+  });
+});
+
+describe("chapters", () => {
+  /** A chain a→b→c→d→e→f with one rejected branch under c. */
+  function chain(): { nodes: GraphNode[]; edges: GraphEdge[] } {
+    const ids = ["a", "b", "c", "d", "e", "f"];
+    const nodes = [...ids.map((id, i) => node(id, i === 0 ? "goal" : "chosen")), node("no", "rejected")];
+    const edges: GraphEdge[] = ids.slice(1).map((id, i) => ({ id: `e${i}`, from: ids[i]!, to: id, kind: "chosen" }));
+    edges.push({ id: "er", from: "c", to: "no", kind: "rejected" });
+    return { nodes, edges };
+  }
+  const chapters = [
+    { title: "Plan", nodeIds: ["a", "b", "c"] },
+    { title: "Build", nodeIds: ["d", "e", "f"] },
+  ];
+
+  test("chapterRuns keeps a branch with its spine row and an unnamed node with the chapter before it", () => {
+    const { nodes, edges } = chain();
+    const rows = timelineRows(nodes, edges);
+    // "no" has no chapter and "e" lost its name: both stay where they are in the story.
+    const runs = chapterRuns(rows, [chapters[0]!, { title: "Build", nodeIds: ["d", "f"] }]);
+    expect(runs.map((r) => [r.title, r.rows.map((x) => x.node.id)])).toEqual([
+      ["Plan", ["a", "b", "c", "no"]],
+      ["Build", ["d", "e", "f"]],
+    ]);
+    expect(chapterRuns(rows, undefined).map((r) => r.title)).toEqual([""]);
+  });
+
+  test("layoutGraph wraps a long row onto new lines instead of growing sideways", () => {
+    const { nodes, edges } = chain();
+    const layout = layoutGraph(nodes, edges, undefined, 2);
+    const step = NODE_W + COL_GAP;
+    expect(layout.width).toBe(2 * step - COL_GAP);
+    expect(layout.lineTops.length).toBe(3);
+    expect(["a", "b", "c", "d", "e", "f"].map((id) => layout.positions.get(id)!.x / step)).toEqual([0, 1, 0, 1, 0, 1]);
+    expect(["a", "c", "e"].map((id) => layout.lines.get(id))).toEqual([0, 1, 2]);
+    // The branch sits under its parent, and the next line starts below the branch.
+    expect(layout.positions.get("no")!.x).toBe(layout.positions.get("c")!.x);
+    expect(layout.positions.get("e")!.y).toBeGreaterThanOrEqual(layout.positions.get("no")!.y + NODE_H);
+    expect(layout.bands.length).toBe(1);
+  });
+
+  test("layoutGraph stacks named chapters as bands that hold their own cards", () => {
+    const { nodes, edges } = chain();
+    const layout = layoutGraph(nodes, edges, chapters, 6);
+    expect(layout.bands.map((b) => b.title)).toEqual(["Plan", "Build"]);
+    const [plan, build] = layout.bands as [(typeof layout.bands)[0], (typeof layout.bands)[0]];
+    expect(build.y).toBeGreaterThan(plan.y + plan.height);
+    expect(layout.height).toBe(build.y + build.height);
+    for (const [i, band] of layout.bands.entries()) {
+      for (const id of band.nodeIds) {
+        const p = layout.positions.get(id)!;
+        expect(layout.bandOf.get(id)).toBe(i);
+        expect(p.y).toBeGreaterThanOrEqual(band.y + BAND_HEAD);
+        expect(p.y + NODE_H).toBeLessThan(band.y + band.height);
+        expect(p.x).toBeGreaterThan(0);
+        expect(p.x + NODE_W).toBeLessThan(layout.width);
+      }
+    }
+  });
+
+  test("edgeGeometry routes an edge to another line through the gap above it, clear of every card", () => {
+    const { nodes, edges } = chain();
+    const layout = layoutGraph(nodes, edges, chapters, 2);
+    const same = edgeGeometry(layout, "a", "b")!;
+    expect(same.wrap).toBe(false);
+    expect(same.d).toBe(edgePath(layout.positions.get("a")!, layout.positions.get("b")!).d);
+
+    for (const [from, to] of [["b", "c"], ["c", "d"]] as const) {
+      const geom = edgeGeometry(layout, from, to)!;
+      expect(geom.wrap).toBe(true);
+      for (const p of layout.positions.values()) {
+        expect(geom.ly > p.y && geom.ly < p.y + NODE_H).toBe(false);
+      }
+      expect(geom.ly).toBeLessThan(layout.positions.get(to)!.y);
+      expect(geom.ly).toBeGreaterThan(layout.positions.get(from)!.y + NODE_H);
+    }
+    expect(edgeGeometry(layout, "a", "missing")).toBeUndefined();
   });
 });

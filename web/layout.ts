@@ -1,4 +1,4 @@
-import type { GraphEdge, GraphNode, NodeKind } from "../src/model";
+import type { GraphChapter, GraphEdge, GraphNode, NodeKind } from "../src/model";
 
 export interface Point {
   x: number;
@@ -35,6 +35,12 @@ export const NODE_W = 248;
 export const NODE_H = 128;
 export const COL_GAP = 120;
 export const ROW_GAP = 42;
+/** Vertical gap between two wrapped lines of one chapter, and between two chapter bands. */
+export const LINE_GAP = 64;
+export const BAND_GAP = 56;
+/** Space inside a chapter band around its cards, and the height of the title strip at its top. */
+export const BAND_PAD = 36;
+export const BAND_HEAD = 96;
 
 const SPINE_KIND: Record<NodeKind, boolean> = {
   goal: true,
@@ -57,87 +63,6 @@ const SPINE_KIND: Record<NodeKind, boolean> = {
  */
 export function isSpineKind(kind: NodeKind): boolean {
   return SPINE_KIND[kind];
-}
-
-const KIND_PRIORITY: Record<NodeKind, number> = {
-  goal: 0,
-  chosen: 1,
-  decision: 2,
-  loop: 3,
-  option: 4,
-  rejected: 5,
-  side: 6,
-};
-
-/**
- * Computes collision-free top-left (x, y) coordinates for every node in a Decision & Path Graph.
- * Columns follow time along the spine: a spine node is never placed left of a spine node that
- * happened before it. A node sits one column right of its parent (same column for a side question);
- * a node with no earlier parent starts after the latest spine node instead of restarting at the far
- * left. Rejected, unchosen option, and side-question branches stay beside the node they branch from
- * and stack below the spine in their column.
- *
- * Args:
- *     nodes (readonly GraphNode[]): Graph nodes to place.
- *     edges (readonly GraphEdge[]): Directed edges between nodes.
- *
- * Returns:
- *     Map<string, Point>: Map of node id to top-left canvas position in px.
- */
-export function layoutGraph(nodes: readonly GraphNode[], edges: readonly GraphEdge[]): Map<string, Point> {
-  const pos = new Map<string, Point>();
-  if (nodes.length === 0) return pos;
-
-  const orderIndex = new Map(nodes.map((n, i) => [n.id, i] as const));
-  const incoming = new Map<string, GraphEdge[]>();
-  for (const e of edges) {
-    if (!orderIndex.has(e.from) || !orderIndex.has(e.to) || e.from === e.to) continue;
-    const list = incoming.get(e.to) ?? [];
-    list.push(e);
-    incoming.set(e.to, list);
-  }
-
-  // Walk the nodes oldest first. Only parents already placed constrain a node, so an edge that
-  // points back in time (or closes a cycle) cannot pull anything left.
-  const byTime = [...nodes].sort((a, b) => a.at - b.at || (orderIndex.get(a.id) ?? 0) - (orderIndex.get(b.id) ?? 0));
-  const layer = new Map<string, number>();
-  let spineMax = 0;
-  for (const n of byTime) {
-    let col = -1;
-    for (const e of incoming.get(n.id) ?? []) {
-      const fromL = layer.get(e.from);
-      if (fromL === undefined) continue;
-      col = Math.max(col, e.kind === "side" ? fromL : fromL + 1);
-    }
-    const spine = isSpineKind(n.kind);
-    if (col < 0) col = layer.size === 0 ? 0 : spine ? spineMax + 1 : spineMax;
-    else if (spine) col = Math.max(col, spineMax);
-    layer.set(n.id, col);
-    if (spine) spineMax = col;
-  }
-
-  // Group nodes into columns and sort each column so the main spine stays on row 0.
-  const columns = new Map<number, GraphNode[]>();
-  for (const n of nodes) {
-    const col = layer.get(n.id) ?? 0;
-    const list = columns.get(col) ?? [];
-    list.push(n);
-    columns.set(col, list);
-  }
-
-  for (const [col, list] of columns) {
-    list.sort((a, b) => {
-      const pDiff = KIND_PRIORITY[a.kind] - KIND_PRIORITY[b.kind];
-      if (pDiff !== 0) return pDiff;
-      return (orderIndex.get(a.id) ?? 0) - (orderIndex.get(b.id) ?? 0);
-    });
-    const x = col * (NODE_W + COL_GAP);
-    list.forEach((n, row) => {
-      pos.set(n.id, { x, y: row * (NODE_H + ROW_GAP) });
-    });
-  }
-
-  return pos;
 }
 
 function cubic(a: number, b: number, c: number, d: number, t: number): number {
@@ -347,4 +272,199 @@ export function timelineRows(nodes: readonly GraphNode[], edges: readonly GraphE
   }
   rows.push(...loose);
   return rows;
+}
+
+/** Consecutive timeline rows that share a chapter. `title` is "" when the rows have no chapter. */
+export interface ChapterRun {
+  title: string;
+  rows: TimelineRow[];
+}
+
+/**
+ * Cuts timeline rows into chapters. A new chapter starts where the chapter title changes from one
+ * spine row to the next. A branch row stays with the spine row it hangs under, and a node without a
+ * chapter joins the chapter before it.
+ *
+ * Args:
+ *     rows (readonly TimelineRow[]): Rows in display order, as returned by `timelineRows`.
+ *     chapters (readonly GraphChapter[] | undefined): Named chapters of the graph, if any.
+ *
+ * Returns:
+ *     ChapterRun[]: Chapters in display order; every row appears in exactly one.
+ */
+export function chapterRuns(rows: readonly TimelineRow[], chapters: readonly GraphChapter[] | undefined): ChapterRun[] {
+  const titleOf = new Map<string, string>();
+  for (const c of chapters ?? []) {
+    for (const id of c.nodeIds) titleOf.set(id, c.title);
+  }
+  const runs: ChapterRun[] = [];
+  let run: ChapterRun | undefined;
+  for (const row of rows) {
+    const title = run && row.depth === 1 ? run.title : (titleOf.get(row.node.id) ?? run?.title ?? "");
+    if (!run || title !== run.title) {
+      run = { title, rows: [] };
+      runs.push(run);
+    }
+    run.rows.push(row);
+  }
+  return runs;
+}
+
+/** One chapter of the graph view: a box that spans the full graph width. */
+export interface Band {
+  title: string;
+  y: number;
+  height: number;
+  nodeIds: string[];
+}
+
+export interface GraphLayout {
+  /** Top-left canvas position of every node, in px. */
+  positions: Map<string, Point>;
+  /** Wrapped line each node sits on, counted from the top of the graph. */
+  lines: Map<string, number>;
+  /** Top edge of every wrapped line. */
+  lineTops: number[];
+  bands: Band[];
+  /** Index into `bands` for every node. */
+  bandOf: Map<string, number>;
+  width: number;
+  height: number;
+}
+
+/**
+ * Lays the graph out as chapters stacked top to bottom. Inside a chapter the spine runs left to
+ * right in timeline order and wraps onto a new line after `perRow` cards, so the graph is never
+ * wider than `perRow` columns. A rejected, option or side node sits below the spine card it
+ * branches from. Without chapter titles the graph is one unboxed band starting at (0, 0).
+ *
+ * Args:
+ *     nodes (readonly GraphNode[]): Graph nodes to place.
+ *     edges (readonly GraphEdge[]): Directed edges between nodes.
+ *     chapters (readonly GraphChapter[] | undefined): Named chapters of the graph, if any.
+ *     perRow (number): Spine cards per line; at least 1.
+ *
+ * Returns:
+ *     GraphLayout: Positions, line and band of every node, the bands, and the overall size.
+ */
+export function layoutGraph(
+  nodes: readonly GraphNode[],
+  edges: readonly GraphEdge[],
+  chapters: readonly GraphChapter[] | undefined,
+  perRow: number,
+): GraphLayout {
+  const out: GraphLayout = { positions: new Map(), lines: new Map(), lineTops: [], bands: [], bandOf: new Map(), width: 0, height: 0 };
+  const runs = chapterRuns(timelineRows(nodes, edges), chapters);
+  if (runs.length === 0) return out;
+  const boxed = runs.some((r) => r.title !== "");
+  const pad = boxed ? BAND_PAD : 0;
+  const stepX = NODE_W + COL_GAP;
+  const stepY = NODE_H + ROW_GAP;
+
+  let y = 0;
+  let maxCols = 1;
+  for (const run of runs) {
+    const top = y;
+    let col = -1;
+    let depth = 0;
+    const cells = run.rows.map((row) => {
+      if (row.depth === 0 || col < 0) {
+        col++;
+        depth = 0;
+      } else {
+        depth++;
+      }
+      return { id: row.node.id, line: Math.floor(col / perRow), col: col % perRow, depth };
+    });
+    maxCols = Math.max(maxCols, Math.min(col + 1, perRow));
+
+    y += boxed ? BAND_HEAD : 0;
+    const lineCount = Math.floor(col / perRow) + 1;
+    for (let line = 0; line < lineCount; line++) {
+      let deepest = 0;
+      for (const c of cells) {
+        if (c.line !== line) continue;
+        out.positions.set(c.id, { x: pad + c.col * stepX, y: y + c.depth * stepY });
+        out.lines.set(c.id, out.lineTops.length);
+        out.bandOf.set(c.id, out.bands.length);
+        deepest = Math.max(deepest, c.depth);
+      }
+      out.lineTops.push(y);
+      y += deepest * stepY + NODE_H + LINE_GAP;
+    }
+    y += pad - LINE_GAP;
+    out.bands.push({ title: run.title, y: top, height: y - top, nodeIds: cells.map((c) => c.id) });
+    y += BAND_GAP;
+  }
+  out.width = 2 * pad + maxCols * stepX - COL_GAP;
+  out.height = y - BAND_GAP;
+  return out;
+}
+
+/** SVG path through `points` with every corner rounded by at most `radius`. */
+function roundedPath(points: readonly Point[], radius: number): string {
+  let d = "";
+  points.forEach((p, i) => {
+    const prev = points[i - 1];
+    const next = points[i + 1];
+    if (!prev) d = `M ${p.x} ${p.y}`;
+    else if (!next) d += ` L ${p.x} ${p.y}`;
+    else {
+      const before = Math.hypot(p.x - prev.x, p.y - prev.y);
+      const after = Math.hypot(next.x - p.x, next.y - p.y);
+      const r = Math.min(radius, before / 2, after / 2);
+      if (r <= 0) return;
+      const ax = p.x - ((p.x - prev.x) / before) * r;
+      const ay = p.y - ((p.y - prev.y) / before) * r;
+      const bx = p.x + ((next.x - p.x) / after) * r;
+      const by = p.y + ((next.y - p.y) / after) * r;
+      d += ` L ${ax} ${ay} Q ${p.x} ${p.y} ${bx} ${by}`;
+    }
+  });
+  return d;
+}
+
+/** Horizontal distance between a card's side and the vertical run of a wrap connector. */
+const WRAP_STUB = 22;
+
+/**
+ * Computes the path of an edge in a laid-out graph. Two nodes on the same line get the smooth curve
+ * of `edgePath`. Nodes on different lines get a wrap connector that never crosses a card: out of the
+ * source's right side, through the column gap to the free strip above the target's line (above its
+ * chapter when the chapters differ), along that strip, and into the target's left side.
+ *
+ * Args:
+ *     layout (GraphLayout): Layout that holds both nodes.
+ *     from (string): Source node id.
+ *     to (string): Target node id.
+ *
+ * Returns:
+ *     (EdgeGeometry & { wrap: boolean }) | undefined: Path and label position; undefined when either node is not laid out.
+ */
+export function edgeGeometry(layout: GraphLayout, from: string, to: string): (EdgeGeometry & { wrap: boolean }) | undefined {
+  const a = layout.positions.get(from);
+  const b = layout.positions.get(to);
+  const lineB = layout.lines.get(to);
+  const band = layout.bands[layout.bandOf.get(to) ?? -1];
+  if (!a || !b || lineB === undefined || !band) return undefined;
+  if (layout.lines.get(from) === lineB) return { ...edgePath(a, b), wrap: false };
+
+  const sameBand = layout.bandOf.get(from) === layout.bandOf.get(to);
+  const strip = sameBand ? (layout.lineTops[lineB] ?? b.y) - LINE_GAP / 2 : band.y - BAND_GAP / 2;
+  const y1 = a.y + NODE_H / 2;
+  const y2 = b.y + NODE_H / 2;
+  const outX = a.x + NODE_W + WRAP_STUB;
+  const inX = b.x - WRAP_STUB;
+  const d = roundedPath(
+    [
+      { x: a.x + NODE_W, y: y1 },
+      { x: outX, y: y1 },
+      { x: outX, y: strip },
+      { x: inX, y: strip },
+      { x: inX, y: y2 },
+      { x: b.x, y: y2 },
+    ],
+    14,
+  );
+  return { d, lx: b.x + NODE_W / 2, ly: strip, vertical: false, wrap: true };
 }

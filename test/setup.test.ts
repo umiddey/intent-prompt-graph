@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { configFile, loadConfig } from "../src/config";
-import { setupClaude, stateDir, uninstall, writeLabeler } from "../src/setup";
+import { setupClaude, stateDir, uninstall, updatePlan, writeLabeler } from "../src/setup";
 import { isolate, type Isolation } from "./support";
 
 let iso: Isolation;
@@ -69,5 +69,18 @@ describe("ipg uninstall", () => {
     expect(existsSync(configFile(env))).toBe(false);
     expect(existsSync(stateDir(env))).toBe(false);
     expect(readdirSync(dir)).toEqual(["mine.md"]);
+  });
+});
+
+describe("ipg update", () => {
+  test("picks the installer that owns the copy, and leaves a checkout or a current copy alone", () => {
+    const name = "intent-prompt-graph";
+    const bun = `/home/u/.bun/install/global/node_modules/${name}`;
+    const npm = `/usr/lib/node_modules/${name}`;
+    expect(updatePlan(bun, name, "0.1.5", "0.1.6")).toEqual({ kind: "run", argv: ["bun", "add", "-g", `${name}@0.1.6`] });
+    expect(updatePlan(npm, name, "0.1.5", "0.1.6")).toEqual({ kind: "run", argv: ["npm", "install", "-g", `${name}@0.1.6`] });
+    expect(updatePlan(bun, name, "0.1.6", "0.1.6")).toEqual({ kind: "current" });
+    // A checkout is never overwritten from npm, whatever its version says.
+    expect(updatePlan(`/home/u/projects/${name}`, name, "0.1.5", "0.1.6")).toEqual({ kind: "checkout" });
   });
 });

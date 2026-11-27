@@ -36,6 +36,14 @@ ipg setup labeler --off
 Changing the labeler stops a running page server, so the next graph you open
 uses the new model. `ipg stop` stops it by hand.
 
+Update:
+
+```sh
+ipg update              # installs the latest version from npm and stops the page server
+```
+
+It tells you when the OMP plugin copy needs `omp plugin install` too.
+
 Uninstall:
 
 ```sh
@@ -51,6 +59,20 @@ bun install
 bun link                           # `ipg` on PATH
 omp plugin link "$PWD"             # /ipg in OMP
 ```
+
+## The page
+
+Two views of the same session: **Timeline** (a list, top to bottom) and
+**Graph**. With a labeler, the cards are grouped into named **chapters**:
+
+- Graph: one box per chapter, stacked top to bottom. A long chapter wraps onto
+  new lines instead of growing sideways. The mini-map at the top right shows
+  every chapter; click one to go there.
+- Sidebar and timeline: a heading per chapter; click it to go there.
+- Keys: `[` and `]` previous and next chapter, `0` whole graph (graph view),
+  Up and Down previous and next card.
+
+Without a labeler there are no chapter names; the graph still wraps.
 
 ## OMP integration
 
@@ -175,6 +197,6 @@ The labeler sends the conversation to the endpoint you configure, or to the loca
 - agent messages, truncated to 1200 characters;
 - tool use as counts per tool name, not tool output;
 - guest messages replaced by the placeholder `[guest message withheld]`;
-- after the first batch, an outline of the graph so far (node ids, kinds and titles, edge endpoints and kinds), so the model replies with only what changed.
+- after the first batch, an outline of the graph so far (node ids, kinds, titles and chapter names, edge endpoints and kinds), so the model replies with only what changed.
 
 Choose an endpoint or CLI account you trust with those contents. Nothing is sent anywhere else.

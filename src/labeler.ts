@@ -1,5 +1,5 @@
 import type { LabelerConfig } from "./config";
-import type { Author, EdgeKind, GraphEdge, GraphNode, NodeKind, SessionGraph, Turn } from "./model";
+import type { Author, EdgeKind, GraphChapter, GraphEdge, GraphNode, NodeKind, SessionGraph, Turn } from "./model";
 
 export const OWNER_CHARS = 800;
 export const AGENT_CHARS = 1200;
@@ -9,6 +9,7 @@ export const DESC_CHARS = 240;
 export const RATIONALE_CHARS = 400;
 export const BADGE_CHARS = 32;
 export const EDGE_LABEL_CHARS = 40;
+export const CHAPTER_CHARS = 40;
 export const GUEST_PLACEHOLDER = "[guest message withheld]";
 export const TIMEOUT_MS = 90_000;
 
@@ -31,7 +32,7 @@ export interface GraphExtractInput {
   /** Slim outline of the graph built so far; when present the model replies with a patch, not the full graph. */
   existingGraph?: {
     title: string;
-    nodes: { id: string; kind: NodeKind; title: string; rounds?: number }[];
+    nodes: { id: string; kind: NodeKind; title: string; rounds?: number; chapter?: string }[];
     edges: { from: string; to: string; kind: EdgeKind }[];
   };
   /** Present on a tidy-up request: no new turns, the reply only merges nodes to reach about this many. */
@@ -59,14 +60,16 @@ Rules:
 - Keep the graph concise and high-signal (typically 5-18 nodes). Do not create separate nodes for routine acknowledgements.
 - Connect nodes with directed edges (from -> to) using kinds: "chosen", "rejected", "option", "decision", "loop", "side", with a short edge "label" (<= 4 words). Every non-goal node should be reachable from the goal.
 - Without "existingGraph", return the complete first graph for the given turns.
-- If "existingGraph" is provided, it outlines the graph built so far (node id, kind, title, rounds; edge from, to, kind). Reply with a PATCH for the new turns, NOT the whole graph: "nodes" holds ONLY nodes that are new or changed, and "edges" holds ONLY new edges. NEVER repeat an unchanged node. Nodes you leave out are kept exactly as they are.
+- If "existingGraph" is provided, it outlines the graph built so far (node id, kind, title, rounds, chapter; edge from, to, kind). Reply with a PATCH for the new turns, NOT the whole graph: "nodes" holds ONLY nodes that are new or changed, and "edges" holds ONLY new edges. NEVER repeat an unchanged node. Nodes you leave out are kept exactly as they are.
 - In a patch, first try to extend an existing node: return its "id" with the new turn refs in "turnIds" (and a better "title" or "desc" if the step moved on). Add a new node only when the new turns start a genuinely new step. One owner message plus its reply adds at most ONE new node, plus one "rejected" node if the owner refused something. Most patches add zero or one node.
 - To fold an existing node into another, return {"id":"<node to remove>","mergeInto":"<node that absorbs it>"}. Its turn refs and edges move to the absorbing node.
 - If "consolidate" is provided there are no new turns: the graph has grown too long. Shrink it to about "consolidate.targetNodes" nodes using "mergeInto". Fold questions, caveats, notes, unpicked options and small sub-steps into the decision or result they belong to. Keep the goal, real owner rejections, and the main outcomes. You may also return an absorbing node with a new "title" and "desc" that cover what it absorbed. Return no new nodes.
 - To change an existing node, return its "id" plus ONLY the fields that change (e.g. "kind" with a matching "badge" and "rationaleLabel", or "rounds"). "turnIds" on a changed node lists only the newly added turn refs; they are added to the ones it already has.
 - New nodes need ids not used in "existingGraph". New edges may connect new and existing node ids. To change the kind or label of an existing edge, return it again with the same "from" and "to".
 - An empty "nodes" array is valid when the new turns add nothing to an existing graph.
-- Every new node must include: "id", "kind", "badge" (2-3 uppercase words), "title" (<= 10 words), "desc" (1-2 concise sentences), "rationaleLabel" (e.g. "Why chosen" / "Why rejected"), "rationale" (clear concrete reason), "turnIds" (array of turn refs from the input).
+- Every new node must include: "id", "kind", "badge" (2-3 uppercase words), "title" (<= 10 words), "desc" (1-2 concise sentences), "rationaleLabel" (e.g. "Why chosen" / "Why rejected"), "rationale" (clear concrete reason), "turnIds" (array of turn refs from the input), "chapter".
+- "chapter" names the phase of work a node belongs to, in 2-4 plain words (e.g. "Publish to npm", "Fix login bug"). Consecutive nodes about the same piece of work share the exact same chapter name; start a new name when the work moves to a different topic. A chapter usually holds 3-8 nodes. Do not number chapters.
+- If nodes in "existingGraph" have no "chapter", give every one of them a chapter in this reply: return {"id":"<node>","chapter":"<name>"} for each.
 
 Reply with raw JSON only (no markdown fences, no commentary before or after):
 {"title":"...","nodes":[...],"edges":[{"from":"...","to":"...","kind":"...","label":"..."}]}`;
@@ -262,6 +265,20 @@ function updatedNode(old: GraphNode, rec: Record<string, unknown>, turnTimestamp
   return node;
 }
 
+/** Adds `chapters` to a graph: one entry per chapter name, in the order the names first appear among the nodes. */
+function withChapters(graph: SessionGraph, chapterOf: ReadonlyMap<string, string>): SessionGraph {
+  const byTitle = new Map<string, GraphChapter>();
+  for (const n of graph.nodes) {
+    const title = chapterOf.get(n.id);
+    if (title === undefined) continue;
+    const chapter = byTitle.get(title);
+    if (chapter) chapter.nodeIds.push(n.id);
+    else byTitle.set(title, { title, nodeIds: [n.id] });
+  }
+  if (byTitle.size > 0) graph.chapters = [...byTitle.values()];
+  return graph;
+}
+
 /**
  * Validates the LLM's Decision & Path Graph JSON reply and merges it into the existing graph.
  * Without an existing graph the reply is the complete first graph. With one, the reply is a patch:
@@ -296,6 +313,10 @@ export function parseGraphOutput(raw: string, turnTimestamps: ReadonlyMap<string
   const seenIds = new Set<string>();
   const mergeInto = new Map<string, string>();
 
+  const chapterOf = new Map<string, string>();
+  for (const c of existing?.chapters ?? []) {
+    for (const nodeId of c.nodeIds) chapterOf.set(nodeId, c.title);
+  }
   for (const item of root.nodes) {
     if (typeof item !== "object" || item === null) throw bad("node is not an object");
     const rec = item as Record<string, unknown>;
@@ -309,6 +330,8 @@ export function parseGraphOutput(raw: string, turnTimestamps: ReadonlyMap<string
       continue;
     }
     byId.set(id, old ? updatedNode(old, rec, turnTimestamps) : newNode(id, rec, turnTimestamps));
+    const chapter = optionalString(rec, "chapter", CHAPTER_CHARS);
+    if (chapter !== undefined) chapterOf.set(id, chapter);
   }
 
   const edges: GraphEdge[] = existing ? [...existing.edges] : [];
@@ -352,7 +375,7 @@ export function parseGraphOutput(raw: string, turnTimestamps: ReadonlyMap<string
     }
   }
 
-  if (mergeInto.size === 0) return { title, nodes: [...byId.values()], edges, mode: "llm" };
+  if (mergeInto.size === 0) return withChapters({ title, nodes: [...byId.values()], edges, mode: "llm" }, chapterOf);
 
   // Follow merge chains (a into b, b into c) to the node that survives. A merge whose chain ends
   // on an unknown node, loops, or would remove the goal is ignored.
@@ -391,7 +414,7 @@ export function parseGraphOutput(raw: string, turnTimestamps: ReadonlyMap<string
     seenPairs.add(key);
     merged.push({ ...e, from, to });
   }
-  return { title, nodes: [...byId.values()], edges: merged, mode: "llm" };
+  return withChapters({ title, nodes: [...byId.values()], edges: merged, mode: "llm" }, chapterOf);
 }
 
 /**

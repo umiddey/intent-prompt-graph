@@ -51,12 +51,20 @@ export interface GraphEdge {
   label?: string;
 }
 
+/** A named phase of the session, e.g. "Publish to npm": the nodes that belong to one piece of work. */
+export interface GraphChapter {
+  title: string;
+  nodeIds: string[];
+}
+
 export interface SessionGraph {
   title: string;
   nodes: GraphNode[];
   edges: GraphEdge[];
   /** "llm" when produced by the configured LLM extractor; "heuristic" for deterministic fallback. */
   mode: "llm" | "heuristic";
+  /** Phases named by the LLM extractor, oldest first. Absent when no node has a chapter. */
+  chapters?: GraphChapter[];
 }
 
 export type ServerEvent =

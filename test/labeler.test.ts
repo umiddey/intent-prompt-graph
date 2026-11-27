@@ -286,6 +286,37 @@ describe("parseGraphOutput patch merge", () => {
       { id: "e5", from: "l1", to: "s1", kind: "side" },
     ]);
   });
+
+  test("groups nodes into chapters: new names, names kept from before, backfill, and merged nodes dropped", () => {
+    const named = parseGraphOutput(
+      JSON.stringify({
+        nodes: [
+          { id: "g1", chapter: "Planning" },
+          { id: "l1", chapter: "Planning" },
+          { id: "c1", kind: "chosen", title: "Save-time hook", turnIds: ["t4"], chapter: "Build the hook" },
+        ],
+        edges: [{ from: "l1", to: "c1", kind: "chosen" }],
+      }),
+      ts,
+      existingGraph(),
+    );
+    expect(named.chapters).toEqual([
+      { title: "Planning", nodeIds: ["g1", "l1"] },
+      { title: "Build the hook", nodeIds: ["c1"] },
+    ]);
+    // The backfill entries carry only id and chapter: the nodes themselves are unchanged.
+    expect(named.nodes.slice(0, 2)).toEqual(existingGraph().nodes);
+
+    // A later patch that names nothing keeps the stored chapters; a merged node leaves its chapter.
+    const later = parseGraphOutput(JSON.stringify({ nodes: [{ id: "l1", mergeInto: "g1" }] }), ts, named);
+    expect(later.chapters).toEqual([
+      { title: "Planning", nodeIds: ["g1"] },
+      { title: "Build the hook", nodeIds: ["c1"] },
+    ]);
+
+    // No chapter anywhere: the field is absent, as in graphs stored before chapters existed.
+    expect(parseGraphOutput(JSON.stringify({ nodes: [] }), ts, existingGraph()).chapters).toBeUndefined();
+  });
 });
 
 describe("redactTurn and I5 privacy", () => {

@@ -1,12 +1,14 @@
 #!/usr/bin/env bun
-import { writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { configFile, type Config, type LabelerConfig, loadConfig } from "./config";
 import { renderDecisionLog } from "./export";
 import { type Harness, harnessById, type SessionRef } from "./harness/harness";
 import { buildHeuristicGraph } from "./heuristic";
 import type { Turn } from "./model";
 import { APP, STOP_HEADER, startDaemon } from "./server";
-import { setupClaude, uninstall, writeLabeler } from "./setup";
+import { setupClaude, uninstall, updatePlan, writeLabeler } from "./setup";
 import { openStore } from "./store";
 import { tailJsonl } from "./tail";
 
@@ -19,6 +21,7 @@ const USAGE = [
   "       ipg setup labeler --provider claude-cli|openai --model <name> [--base-url <url>] [--api-key-env <VAR>] [--command <path>]",
   "       ipg setup labeler --off",
   "       ipg stop [--port N]",
+  "       ipg update",
   "       ipg uninstall [--purge]",
 ].join("\n");
 
@@ -268,6 +271,49 @@ async function uninstallAll(args: string[]): Promise<number> {
   return 0;
 }
 
+function versionIn(dir: string): string | undefined {
+  const file = join(dir, "package.json");
+  if (!existsSync(file)) return undefined;
+  const pkg: unknown = JSON.parse(readFileSync(file, "utf8"));
+  return typeof pkg === "object" && pkg !== null && "version" in pkg && typeof pkg.version === "string" ? pkg.version : undefined;
+}
+
+/** Installs the latest version from npm, then stops the page server so the next graph uses it. */
+async function update(args: string[]): Promise<number> {
+  const pkgDir = join(import.meta.dir, "..");
+  const current = versionIn(pkgDir) ?? "unknown";
+  const res = await fetch(`https://registry.npmjs.org/${APP}/latest`, { signal: AbortSignal.timeout(10_000) });
+  if (!res.ok) throw new Error(`npm did not answer (${res.status}); try again later`);
+  const body: unknown = await res.json();
+  if (typeof body !== "object" || body === null || !("version" in body) || typeof body.version !== "string") {
+    throw new Error("npm sent no version; try again later");
+  }
+  const latest = body.version;
+
+  const plan = updatePlan(pkgDir, APP, current, latest);
+  if (plan.kind === "checkout") {
+    console.log(`ipg ${current} runs from a checkout (${pkgDir}); npm has ${latest}. Update it with: git pull`);
+    return 0;
+  }
+  if (plan.kind === "current") {
+    console.log(`ipg ${current} is the latest version.`);
+  } else {
+    console.log(`updating ipg ${current} → ${latest}: ${plan.argv.join(" ")}`);
+    const code = await Bun.spawn(plan.argv, { stdio: ["ignore", "inherit", "inherit"] }).exited;
+    if (code !== 0) throw new Error(`${plan.argv.join(" ")} failed (exit ${code})`);
+    const stopped = await stopDaemon(portOf(args, loadConfig()));
+    if (stopped === "stopped") console.log("Page server stopped; it starts on the new version the next time you open a graph.");
+    else if (stopped === "old") console.log(OLD_DAEMON);
+    console.log(`ipg is now ${latest}.`);
+  }
+  // The OMP plugin is a second copy of the package; OMP installs it, so its update is OMP's command.
+  const plugin = versionIn(join(homedir(), ".omp", "plugins", "node_modules", APP));
+  if (plugin !== undefined && plugin !== latest) {
+    console.log(`The OMP plugin is still ${plugin}. Update it with: omp plugin install ${APP}@${latest}`);
+  }
+  return 0;
+}
+
 async function main(argv: string[]): Promise<number> {
   const [cmd, ...rest] = argv;
   try {
@@ -286,6 +332,8 @@ async function main(argv: string[]): Promise<number> {
         return await stop(rest);
       case "uninstall":
         return await uninstallAll(rest);
+      case "update":
+        return await update(rest);
       default:
         console.error(USAGE);
         return 2;

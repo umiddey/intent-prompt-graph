@@ -119,6 +119,10 @@ export async function openSession(opts: { harness: Harness; ref: SessionRef; con
       turns: batch.map(redactTurn),
     };
     if (store.graph) {
+      const chapterOf = new Map<string, string>();
+      for (const c of store.graph.chapters ?? []) {
+        for (const id of c.nodeIds) chapterOf.set(id, c.title);
+      }
       // Outline only: the reply is a patch that the labeler merges into store.graph locally.
       input.existingGraph = {
         title: store.graph.title,
@@ -127,6 +131,7 @@ export async function openSession(opts: { harness: Harness; ref: SessionRef; con
           kind: n.kind,
           title: n.title,
           ...(n.rounds !== undefined ? { rounds: n.rounds } : {}),
+          ...(chapterOf.has(n.id) ? { chapter: chapterOf.get(n.id) } : {}),
         })),
         edges: store.graph.edges.map((e) => ({ from: e.from, to: e.to, kind: e.kind })),
       };

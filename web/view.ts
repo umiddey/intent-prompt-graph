@@ -1,13 +1,18 @@
 import type { GraphNode, NodeKind, SessionGraph, Turn } from "../src/model";
 import {
+  BAND_GAP,
+  BAND_PAD,
+  chapterRuns,
   COL_GAP,
-  edgePath,
+  edgeGeometry,
   isSpineKind,
   layoutGraph,
   NODE_H,
   NODE_W,
   pruneGraph,
   timelineRows,
+  type ChapterRun,
+  type GraphLayout,
   type GraphSlice,
   type Point,
   type TimelineRow,
@@ -44,9 +49,13 @@ export interface Els {
   tlSummary: HTMLElement;
   tlRows: HTMLElement;
   world: HTMLElement;
+  bands: HTMLElement;
   edges: SVGSVGElement;
   nodes: HTMLElement;
   labels: HTMLElement;
+  minimap: HTMLElement;
+  miniBands: HTMLElement;
+  miniView: HTMLElement;
   keyed: Map<string, HTMLElement>;
   panel: HTMLElement;
   banner: HTMLElement;
@@ -55,13 +64,19 @@ export interface Els {
   follow: HTMLElement;
 }
 
-const MIN_ZOOM = 0.25;
+/** Low enough to show a long session whole; card text is unreadable there, chapter titles are not. */
+const MIN_ZOOM = 0.1;
 const MAX_ZOOM = 2.2;
 /** Lowest zoom at which card text is still readable; Fit never zooms out further than this. */
 export const FIT_FLOOR = 0.6;
 /** Free space kept around the graph, in px, and the extra bottom inset that clears the floating #bar. */
 const PAD = 40;
 const BAR_CLEARANCE = 48;
+/** Width of the mini-map's drawing, and of the strip on the right of the stage that the mini-map covers. */
+const MINI_W = 96;
+const MINI_SPACE = 150;
+/** Below this zoom the graph hides card descriptions and edge labels. */
+const FAR_ZOOM = 0.34;
 const ENTITIES: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
 
 const COLOR_GROUP: Record<NodeKind, ColorGroup> = {
@@ -105,6 +120,51 @@ function setHtml(el: Element, html: string): void {
 function clock(at: number): string {
   if (!at) return "";
   return new Date(at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+/**
+ * Picks how many spine cards go on one line of the graph: as many as fit the stage at FIT_FLOOR
+ * zoom beside the mini-map, between 2 and 6.
+ *
+ * Args:
+ *     vw (number): Viewport client width in px.
+ *
+ * Returns:
+ *     number: Cards per line.
+ */
+export function perRowFor(vw: number): number {
+  const room = (vw - 2 * PAD - MINI_SPACE) / FIT_FLOOR - 2 * BAND_PAD + COL_GAP;
+  return Math.min(6, Math.max(2, Math.floor(room / (NODE_W + COL_GAP))));
+}
+
+/**
+ * Cuts the nodes left by the active filter into chapters, in timeline order. The graph's bands and
+ * every `data-chapter` index on the page count these chapters.
+ *
+ * Args:
+ *     s (State): Current UI state.
+ *
+ * Returns:
+ *     ChapterRun[]: Chapters in display order.
+ */
+export function shownChapters(s: State): ChapterRun[] {
+  const shown = filterGraph(s.graph, s.filter);
+  return chapterRuns(timelineRows(shown.nodes, shown.edges), s.graph.chapters);
+}
+
+function chapterMeta(nodes: readonly GraphNode[]): string {
+  const rejected = nodes.filter((n) => n.kind === "rejected").length;
+  return [nodes.length === 1 ? "1 card" : `${nodes.length} cards`, rejected > 0 ? `${rejected} rejected` : "", clock(nodes[0]?.at ?? 0)]
+    .filter(Boolean)
+    .join(" · ");
+}
+
+/** Heading shared by the sidebar, the timeline and the graph: number, title, and what the chapter holds. */
+function chapterHead(tag: string, cls: string, index: number, title: string, nodes: readonly GraphNode[]): string {
+  return (
+    `<${tag} class="${cls}" data-chapter="${index}"><i>${index + 1}</i>` +
+    `<b>${esc(title || "No chapter")}</b><span>${esc(chapterMeta(nodes))}</span></${tag}>`
+  );
 }
 
 /**
@@ -304,62 +364,121 @@ export function paintSidebar(s: State, els: Els): void {
     .map((p) => `<span class="pill">${esc(p)}</span>`)
     .join("");
 
+  const item = (n: GraphNode, group: ColorGroup): string =>
+    `<li class="summary-item grp-${group}${n.id === selId ? " on" : ""}" data-jump="${esc(n.id)}">` +
+    `<div class="st">${esc(n.title)}</div>` +
+    `<div class="sd">${esc(n.desc)}</div>` +
+    `</li>`;
   const renderList = (items: GraphNode[], group: ColorGroup, empty: string): string => {
     if (items.length === 0) return `<p class="empty-note">${esc(empty)}</p>`;
-    return `<ul class="summary-list">${items
-      .map(
-        (n) =>
-          `<li class="summary-item grp-${group}${n.id === selId ? " on" : ""}" data-jump="${esc(n.id)}">` +
-          `<div class="st">${esc(n.title)}</div>` +
-          `<div class="sd">${esc(n.desc)}</div>` +
-          `</li>`,
-      )
-      .join("")}</ul>`;
+    return `<ul class="summary-list">${items.map((n) => item(n, group)).join("")}</ul>`;
   };
+
+  // With named chapters the outcomes are grouped under them, and every chapter gets a heading to jump to.
+  const runs = shownChapters(s);
+  let outcomes: string;
+  if (runs.some((r) => r.title !== "")) {
+    const listed = new Set<string>();
+    outcomes = runs
+      .map((run, i) => {
+        const nodes = run.rows.map((r) => r.node);
+        const mine = nodes.filter((n) => n.kind === "chosen");
+        for (const n of mine) listed.add(n.id);
+        return chapterHead("li", "chapter-head", i, run.title, nodes) + mine.map((n) => item(n, "chosen")).join("");
+      })
+      .join("");
+    const hidden = sum.outcomes.filter((n) => !listed.has(n.id));
+    outcomes = `<ul class="summary-list">${outcomes}${hidden.map((n) => item(n, "chosen")).join("")}</ul>`;
+  } else {
+    outcomes = renderList(sum.outcomes, "chosen", "No final outcomes yet.");
+  }
 
   setHtml(
     els.sidebar,
     `<div><div class="sec-title">Session Overview</div><h2 class="session-heading">${esc(s.graph.title || "Waiting for turns")}</h2><div class="session-meta">${pills}</div></div>` +
-      `<div><div class="sec-title">Chosen Path &amp; Outcomes</div>${renderList(sum.outcomes, "chosen", "No final outcomes yet.")}</div>` +
+      `<div><div class="sec-title">Chosen Path &amp; Outcomes</div>${outcomes}</div>` +
       `<div><div class="sec-title">Rejected / Unchosen Paths</div>${renderList(sum.rejected, "rejected", "No paths rejected or skipped yet.")}</div>`,
   );
 }
 
 /**
- * Renders the layered DAG into the graph stage: nodes left by the active filter, cubic-Bezier SVG
- * edges, and edge labels in a layer above the cards.
+ * Renders the graph stage: chapter boxes, the nodes left by the active filter, SVG edges, edge
+ * labels in a layer above the cards, and the mini-map.
  *
  * Args:
  *     s (State): Current UI state.
  *     els (Els): Cached DOM element references.
  *
  * Returns:
- *     Map<string, Point>: Computed layout positions for all rendered nodes.
+ *     GraphLayout: Layout of all rendered nodes.
  */
-export function paintGraph(s: State, els: Els): Map<string, Point> {
+export function paintGraph(s: State, els: Els): GraphLayout {
   const shown = filterGraph(s.graph, s.filter);
-  const positions = layoutGraph(shown.nodes, shown.edges);
+  const layout = layoutGraph(shown.nodes, shown.edges, s.graph.chapters, perRowFor(els.viewport.clientWidth));
+  const positions = layout.positions;
   const selId = selectedNode(s)?.id;
   const latestId = followTarget(s.graph)?.id;
-  const kindOf = new Map(shown.nodes.map((n) => [n.id, n.kind] as const));
+  const byId = new Map(shown.nodes.map((n) => [n.id, n] as const));
 
   let paths = "";
   let labels = "";
   for (const e of shown.edges) {
     const a = positions.get(e.from);
     const b = positions.get(e.to);
-    const toKind = kindOf.get(e.to);
-    if (!a || !b || !toKind || e.from === e.to) continue;
-    const geom = edgePath(a, b);
-    paths += `<path class="edge grp-${colorGroup(toKind)}" d="${geom.d}"/>`;
+    const to = byId.get(e.to);
+    const geom = e.from === e.to ? undefined : edgeGeometry(layout, e.from, e.to);
+    if (!a || !b || !to || !geom) continue;
+    paths += `<path class="edge${geom.wrap ? " wrap" : ""} grp-${colorGroup(to.kind)}" d="${geom.d}"/>`;
     if (!e.label) continue;
     // A label is as wide as the gap it sits in. On a level edge it rides above the line.
-    const width = geom.vertical ? NODE_W - 24 : COL_GAP - 12;
-    const place = geom.vertical ? " vertical" : a.y === b.y ? " above" : "";
+    const width = geom.vertical || geom.wrap ? NODE_W - 24 : COL_GAP - 12;
+    const place = geom.vertical ? " vertical" : !geom.wrap && a.y === b.y ? " above" : "";
     labels += `<div class="edge-label${place}" style="left:${geom.lx}px;top:${geom.ly}px;max-width:${width}px">${esc(e.label)}</div>`;
   }
   setHtml(els.edges, paths);
   setHtml(els.labels, labels);
+
+  // Chapter boxes behind the cards, and the same chapters drawn small in the mini-map.
+  const boxed = layout.bands.some((b) => b.title !== "");
+  const bandNodes = (ids: readonly string[]): GraphNode[] => ids.flatMap((id) => byId.get(id) ?? []);
+  setHtml(
+    els.bands,
+    boxed
+      ? layout.bands
+          .map(
+            (b, i) =>
+              `<div class="band" style="top:${b.y}px;width:${layout.width}px;height:${b.height}px">` +
+              `${chapterHead("div", "band-head", i, b.title, bandNodes(b.nodeIds))}</div>`,
+          )
+          .join("")
+      : "",
+  );
+  const mini = hasMinimap(layout);
+  els.minimap.hidden = !mini;
+  if (mini) {
+    const k = miniScale(layout, els.viewport.clientHeight);
+    els.minimap.classList.toggle("boxed", boxed);
+    els.miniBands.style.width = `${layout.width * k}px`;
+    els.miniBands.style.height = `${layout.height * k}px`;
+    setHtml(
+      els.miniBands,
+      layout.bands
+        .map((b, i) => {
+          const dots = b.nodeIds
+            .map((id) => {
+              const p = positions.get(id);
+              const n = byId.get(id);
+              if (!p || !n) return "";
+              const cls = `mini-dot grp-${colorGroup(n.kind)}${id === selId ? " selected" : ""}`;
+              return `<i class="${cls}" style="left:${p.x * k}px;top:${(p.y - b.y) * k}px;width:${NODE_W * k}px;height:${NODE_H * k}px"></i>`;
+            })
+            .join("");
+          const title = b.title ? ` title="${esc(`${i + 1}. ${b.title}`)}"` : "";
+          return `<div class="mini-band" data-chapter="${i}"${title} style="top:${b.y * k}px;height:${b.height * k}px"><em>${i + 1}</em>${dots}</div>`;
+        })
+        .join(""),
+    );
+  }
 
   const keep = new Set<string>();
   for (const n of shown.nodes) {
@@ -399,7 +518,7 @@ export function paintGraph(s: State, els: Els): Map<string, Point> {
     els.keyed.delete(id);
   }
 
-  return positions;
+  return layout;
 }
 
 function summaryLine(key: string, value: string, jump: GraphNode | undefined): string {
@@ -466,16 +585,21 @@ export function paintTimeline(s: State, els: Els): void {
       ),
   );
 
-  const shown = filterGraph(s.graph, s.filter);
-  const rows = timelineRows(shown.nodes, shown.edges);
+  const runs = shownChapters(s);
+  const boxed = runs.some((r) => r.title !== "");
   const selId = selectedNode(s)?.id;
   const latestId = followTarget(s.graph)?.id;
   const empty = s.graph.nodes.length === 0 ? "Waiting for turns in this session…" : "No node matches this filter.";
   setHtml(
     els.tlRows,
-    rows.length === 0
+    runs.length === 0
       ? `<p class="empty-note">${empty}</p>`
-      : `<div class="tl-list">${rows.map((r) => rowHtml(r, selId, latestId)).join("")}</div>`,
+      : `<div class="tl-list">${runs
+          .map((run, i) => {
+            const head = boxed ? chapterHead("div", "tl-chapter", i, run.title, run.rows.map((r) => r.node)) : "";
+            return head + run.rows.map((r) => rowHtml(r, selId, latestId)).join("");
+          })
+          .join("")}</div>`,
   );
 }
 
@@ -592,6 +716,114 @@ export function clampZoom(z: number): number {
 
 export function applyView(world: HTMLElement, v: View): void {
   world.style.transform = `translate(${v.tx}px, ${v.ty}px) scale(${v.z})`;
+  // Chapter titles grow as the graph shrinks, so they stay readable when the cards no longer are.
+  world.style.setProperty("--z", String(v.z));
+  world.classList.toggle("far", v.z < FAR_ZOOM);
+}
+
+/** The mini-map is shown once the graph has wrapped onto a second line. */
+export function hasMinimap(layout: GraphLayout): boolean {
+  return layout.lineTops.length > 1;
+}
+
+/** Scale from graph px to mini-map px: MINI_W wide, shrunk further when the map would be taller than the stage. */
+function miniScale(layout: GraphLayout, vh: number): number {
+  return Math.min(MINI_W / layout.width, Math.max(120, vh - 150) / layout.height);
+}
+
+/** Free space kept right of the graph: the usual padding, plus the mini-map when it is shown. */
+function padRight(layout: GraphLayout): number {
+  return PAD + (hasMinimap(layout) ? MINI_SPACE : 0);
+}
+
+/**
+ * Moves the mini-map's frame to the part of the graph the stage shows, cut off at the graph's edges.
+ *
+ * Args:
+ *     els (Els): Cached DOM element references.
+ *     layout (GraphLayout): Layout the mini-map was painted from.
+ *     v (View): Current view.
+ *
+ * Returns:
+ *     void
+ */
+export function paintMiniView(els: Els, layout: GraphLayout, v: View): void {
+  if (!hasMinimap(layout)) return;
+  const k = miniScale(layout, els.viewport.clientHeight);
+  const span = (offset: number, size: number, max: number): [number, number] => {
+    const lo = Math.min(max, Math.max(0, -offset / v.z));
+    const hi = Math.min(max, Math.max(lo, (size - offset) / v.z));
+    return [lo * k, (hi - lo) * k];
+  };
+  const [left, width] = span(v.tx, els.viewport.clientWidth, layout.width);
+  const [top, height] = span(v.ty, els.viewport.clientHeight, layout.height);
+  const st = els.miniView.style;
+  st.left = `${left}px`;
+  st.top = `${top}px`;
+  st.width = `${width}px`;
+  st.height = `${height}px`;
+}
+
+/**
+ * Finds the chapter at the top of the stage: the first band that still reaches below the top padding.
+ *
+ * Args:
+ *     layout (GraphLayout): Current layout.
+ *     v (View): Current view.
+ *
+ * Returns:
+ *     number: Index into `layout.bands`; -1 when the layout has no bands.
+ */
+export function bandAt(layout: GraphLayout, v: View): number {
+  const y = (PAD + 30 - v.ty) / v.z;
+  const at = layout.bands.findIndex((b) => y < b.y + b.height + BAND_GAP);
+  return at < 0 ? layout.bands.length - 1 : at;
+}
+
+/**
+ * Computes the view that shows one chapter: its band at the top of the stage, as large as fits,
+ * never above 100% and never below FIT_FLOOR.
+ *
+ * Args:
+ *     layout (GraphLayout): Current layout.
+ *     index (number): Index into `layout.bands`.
+ *     vw (number): Viewport client width in px.
+ *     vh (number): Viewport client height in px.
+ *
+ * Returns:
+ *     View | undefined: Target view; undefined when the layout has no such band.
+ */
+export function chapterView(layout: GraphLayout, index: number, vw: number, vh: number): View | undefined {
+  const band = layout.bands[index];
+  if (!band) return undefined;
+  const right = padRight(layout);
+  const fit = Math.min(1, (vw - PAD - right) / layout.width, (vh - 2 * PAD - BAR_CLEARANCE) / band.height);
+  const z = Math.max(FIT_FLOOR, fit);
+  return { z, tx: axisOffset(0, layout.width, layout.width / 2, vw, z, PAD, right), ty: PAD - band.y * z };
+}
+
+/**
+ * Computes the view that shows the whole graph at once, however small that makes it (down to the
+ * minimum zoom).
+ *
+ * Args:
+ *     layout (GraphLayout): Current layout.
+ *     vw (number): Viewport client width in px.
+ *     vh (number): Viewport client height in px.
+ *
+ * Returns:
+ *     View: Target view.
+ */
+export function overviewView(layout: GraphLayout, vw: number, vh: number): View {
+  if (layout.positions.size === 0) return { z: 1, tx: PAD, ty: PAD };
+  const right = padRight(layout);
+  const bottom = PAD + BAR_CLEARANCE;
+  const z = clampZoom(Math.min(1, (vw - PAD - right) / layout.width, (vh - PAD - bottom) / layout.height));
+  return {
+    z,
+    tx: axisOffset(0, layout.width, layout.width / 2, vw, z, PAD, right),
+    ty: axisOffset(0, layout.height, 0, vh, z, PAD, bottom),
+  };
 }
 
 /**
@@ -607,12 +839,12 @@ function axisOffset(lo: number, hi: number, focus: number, size: number, z: numb
 
 /**
  * Computes zoom and translation for the Fit and 100% buttons, from the viewport's client size and
- * the real bounds of the cards. Fit shows the whole graph with padding, never enlarged past 100%.
+ * the size of the laid-out graph. Fit shows the whole graph with padding, never enlarged past 100%.
  * When that would need a zoom below FIT_FLOOR, the zoom stays at FIT_FLOOR. On each axis the graph
  * is centred when it fits; otherwise the focus node is centred, stopping at the graph's edges.
  *
  * Args:
- *     positions (ReadonlyMap<string, Point>): Top-left coordinates of all rendered nodes.
+ *     layout (GraphLayout): Layout of all rendered nodes.
  *     vw (number): Viewport client width in px.
  *     vh (number): Viewport client height in px.
  *     focusId (string | undefined): Selected node, kept in view when the graph does not fit whole.
@@ -622,32 +854,17 @@ function axisOffset(lo: number, hi: number, focus: number, size: number, z: numb
  * Returns:
  *     View: Target zoom and translation coordinates.
  */
-export function fitView(
-  positions: ReadonlyMap<string, Point>,
-  vw: number,
-  vh: number,
-  focusId?: string,
-  zoom?: number,
-): View {
-  if (positions.size === 0) return { z: zoom ?? 1, tx: PAD, ty: PAD };
-  let x0 = Infinity;
-  let y0 = Infinity;
-  let x1 = -Infinity;
-  let y1 = -Infinity;
-  for (const p of positions.values()) {
-    x0 = Math.min(x0, p.x);
-    y0 = Math.min(y0, p.y);
-    x1 = Math.max(x1, p.x + NODE_W);
-    y1 = Math.max(y1, p.y + NODE_H);
-  }
-  const padBottom = PAD + BAR_CLEARANCE;
-  const whole = Math.min(1, (vw - 2 * PAD) / (x1 - x0), (vh - PAD - padBottom) / (y1 - y0));
+export function fitView(layout: GraphLayout, vw: number, vh: number, focusId?: string, zoom?: number): View {
+  if (layout.positions.size === 0) return { z: zoom ?? 1, tx: PAD, ty: PAD };
+  const right = padRight(layout);
+  const bottom = PAD + BAR_CLEARANCE;
+  const whole = Math.min(1, (vw - PAD - right) / layout.width, (vh - PAD - bottom) / layout.height);
   const z = zoom ?? Math.max(FIT_FLOOR, whole);
-  const focus = (focusId !== undefined && positions.get(focusId)) || { x: x0, y: y0 };
+  const focus = (focusId !== undefined && layout.positions.get(focusId)) || { x: 0, y: 0 };
   return {
     z,
-    tx: axisOffset(x0, x1, focus.x + NODE_W / 2, vw, z, PAD, PAD),
-    ty: axisOffset(y0, y1, focus.y + NODE_H / 2, vh, z, PAD, padBottom),
+    tx: axisOffset(0, layout.width, focus.x + NODE_W / 2, vw, z, PAD, right),
+    ty: axisOffset(0, layout.height, focus.y + NODE_H / 2, vh, z, PAD, bottom),
   };
 }
 

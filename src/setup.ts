@@ -131,3 +131,31 @@ export function uninstall(purge: boolean, env: NodeJS.ProcessEnv = process.env):
   }
   return out;
 }
+
+/** What `ipg update` has to do. */
+export type UpdatePlan =
+  | { kind: "current" }
+  /** Installed from a git checkout (`bun link`): updated with git, not from npm. */
+  | { kind: "checkout" }
+  | { kind: "run"; argv: string[] };
+
+/**
+ * Decides how to bring the installed package to the latest published version.
+ *
+ * Args:
+ *     pkgDir (string): Real path of the directory this package runs from.
+ *     name (string): Package name on npm.
+ *     current (string): Installed version.
+ *     latest (string): Latest version on npm.
+ *
+ * Returns:
+ *     UpdatePlan: Nothing to do, a checkout to update by hand, or the install command to run
+ *     (Bun's when the package sits in Bun's global directory, npm's otherwise).
+ */
+export function updatePlan(pkgDir: string, name: string, current: string, latest: string): UpdatePlan {
+  const parts = pkgDir.split(/[\\/]/);
+  if (!parts.includes("node_modules")) return { kind: "checkout" };
+  if (current === latest) return { kind: "current" };
+  const spec = `${name}@${latest}`;
+  return { kind: "run", argv: parts.includes(".bun") ? ["bun", "add", "-g", spec] : ["npm", "install", "-g", spec] };
+}

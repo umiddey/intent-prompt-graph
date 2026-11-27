@@ -1,15 +1,19 @@
 import type { ServerEvent, Turn } from "../src/model";
-import { timelineRows, type Point } from "./layout";
+import { layoutGraph, timelineRows, type GraphLayout } from "./layout";
 import {
   applyView,
+  bandAt,
+  chapterView,
   clampZoom,
   filterGraph,
   fitView,
   followTarget,
   inspectorSignature,
   isNodeVisible,
+  overviewView,
   paintChrome,
   paintGraph,
+  paintMiniView,
   paintInspector,
   paintSidebar,
   paintTimeline,
@@ -44,11 +48,15 @@ const els: Els = {
   sidebar: byId("sidebar"),
   viewport: byId("viewport"),
   tlSummary: byId("tl-summary"),
+  bands: byId("bands"),
   tlRows: byId("tl-rows"),
   world: byId("world"),
   edges: byId<SVGSVGElement>("edges"),
   nodes: byId("nodes"),
   labels: byId("labels"),
+  minimap: byId("minimap"),
+  miniBands: byId("mini-bands"),
+  miniView: byId("mini-view"),
   keyed: new Map(),
   panel: byId("panel"),
   banner: byId("banner"),
@@ -77,22 +85,59 @@ const state: State = {
   follow: true,
 };
 
-let view: View = fitView(new Map(), 0, 0);
-let lastPositions: Map<string, Point> = new Map();
+let lastLayout: GraphLayout = layoutGraph([], [], undefined, 1);
+let view: View = fitView(lastLayout, 0, 0);
 let lastInspectorSig = "";
 let opened = false;
+
+/** The chapter in sight: the band at the top of the graph stage, or the heading last scrolled past in the timeline. */
+function currentChapter(): number {
+  if (state.viewMode === "graph") return bandAt(lastLayout, view);
+  let at = -1;
+  for (const head of els.tlRows.querySelectorAll<HTMLElement>(".tl-chapter")) {
+    if (head.offsetTop > els.tlRows.scrollTop + 16) break;
+    at++;
+  }
+  return Math.max(0, at);
+}
+
+/** Marks the chapter in sight on every chapter heading and on the mini-map. */
+function markChapter(): void {
+  const at = String(currentChapter());
+  for (const el of document.querySelectorAll<HTMLElement>("[data-chapter]")) {
+    el.classList.toggle("on", el.dataset.chapter === at);
+  }
+}
+
+/** Shows `view` on the graph stage and keeps the mini-map and the chapter marks in step with it. */
+function showView(): void {
+  applyView(els.world, view);
+  paintMiniView(els, lastLayout, view);
+  markChapter();
+}
 
 function glideTo(next: View): void {
   view = next;
   els.world.classList.add("glide");
-  applyView(els.world, view);
+  showView();
   window.setTimeout(() => els.world.classList.remove("glide"), 380);
 }
 
 /** Fits the graph, or with `zoom` shows the selected node at that zoom. */
 function glideFit(zoom?: number): void {
   const focus = selectedNode(state)?.id;
-  glideTo(fitView(lastPositions, els.viewport.clientWidth, els.viewport.clientHeight, focus, zoom));
+  glideTo(fitView(lastLayout, els.viewport.clientWidth, els.viewport.clientHeight, focus, zoom));
+}
+
+/** Brings a chapter into sight: its band in the graph, its heading in the timeline. */
+function jumpChapter(index: number): void {
+  if (state.viewMode === "graph") {
+    const next = chapterView(lastLayout, index, els.viewport.clientWidth, els.viewport.clientHeight);
+    if (next) glideTo(next);
+    return;
+  }
+  const head = els.tlRows.querySelector<HTMLElement>(`.tl-chapter[data-chapter="${index}"]`);
+  if (head) els.tlRows.scrollTo({ top: head.offsetTop - 8, behavior: "smooth" });
 }
 
 /** Brings the selected node into sight: scrolls the timeline to its row, or pans the graph to its card. */
@@ -100,7 +145,7 @@ function reveal(): void {
   const id = selectedNode(state)?.id;
   if (id === undefined) return;
   if (state.viewMode === "graph") {
-    const p = lastPositions.get(id);
+    const p = lastLayout.positions.get(id);
     if (!p) return;
     const next = revealView(view, p, els.viewport.clientWidth, els.viewport.clientHeight);
     if (next !== view) glideTo(next);
@@ -131,14 +176,19 @@ function syncHash(): void {
 function render(): void {
   paintTopbar(state, els);
   paintSidebar(state, els);
-  if (state.viewMode === "graph") lastPositions = paintGraph(state, els);
-  else paintTimeline(state, els);
+  if (state.viewMode === "graph") {
+    lastLayout = paintGraph(state, els);
+    paintMiniView(els, lastLayout, view);
+  } else {
+    paintTimeline(state, els);
+  }
   const sig = inspectorSignature(state);
   if (sig !== lastInspectorSig) {
     lastInspectorSig = sig;
     paintInspector(state, els);
   }
   paintChrome(state, els);
+  markChapter();
   syncHash();
 }
 
@@ -237,6 +287,12 @@ document.addEventListener("click", (e) => {
     return;
   }
 
+  const chapter = e.target.closest<HTMLElement>("[data-chapter]");
+  if (chapter) {
+    jumpChapter(Number(chapter.dataset.chapter));
+    return;
+  }
+
   const filterBtn = e.target.closest<HTMLElement>("[data-filter]");
   if (filterBtn) {
     state.filter = filterBtn.dataset.filter as FilterMode;
@@ -250,9 +306,19 @@ document.addEventListener("click", (e) => {
 });
 
 // Up/Down move the selection through the nodes in timeline order, in both views.
+// "[" and "]" step through the chapters, "0" shows the whole graph.
 document.addEventListener("keydown", (e) => {
+  if (e.altKey || e.ctrlKey || e.metaKey) return;
+  if (e.key === "[" || e.key === "]") {
+    jumpChapter(currentChapter() + (e.key === "]" ? 1 : -1));
+    return;
+  }
+  if (e.key === "0" && state.viewMode === "graph") {
+    glideTo(overviewView(lastLayout, els.viewport.clientWidth, els.viewport.clientHeight));
+    return;
+  }
   if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
-  if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
+  if (e.shiftKey) return;
   const shown = filterGraph(state.graph, state.filter);
   const ids = timelineRows(shown.nodes, shown.edges).map((r) => r.node.id);
   const next = stepSelection(ids, selectedNode(state)?.id, e.key === "ArrowDown" ? 1 : -1);
@@ -302,7 +368,7 @@ stage.addEventListener(
       tx: mx - ((mx - view.tx) / view.z) * z,
       ty: my - ((my - view.ty) / view.z) * z,
     };
-    applyView(els.world, view);
+    showView();
   },
   { passive: false },
 );
@@ -325,7 +391,7 @@ stage.addEventListener("pointermove", (e) => {
   view = { ...view, tx: view.tx + e.clientX - press.lastX, ty: view.ty + e.clientY - press.lastY };
   press.lastX = e.clientX;
   press.lastY = e.clientY;
-  applyView(els.world, view);
+  showView();
 });
 const endPress = (): void => {
   if (press?.moving) dragged = true;
@@ -334,15 +400,16 @@ const endPress = (): void => {
 stage.addEventListener("pointerup", endPress);
 stage.addEventListener("pointercancel", endPress);
 
-// The graph keeps fitting the window as it is resized (one refit per frame).
+// The graph is laid out for the window's width, so a resize lays it out and fits it again (once per frame).
 let resizeFrame = 0;
 window.addEventListener("resize", () => {
   if (state.viewMode !== "graph" || resizeFrame) return;
   resizeFrame = requestAnimationFrame(() => {
     resizeFrame = 0;
-    glideFit();
+    renderAndFrame();
   });
 });
+els.tlRows.addEventListener("scroll", markChapter, { passive: true });
 
 const route = /^\/s\/([^/]+)\/([^/]+)$/.exec(location.pathname);
 if (!route) throw new Error("ipg: not a session page");

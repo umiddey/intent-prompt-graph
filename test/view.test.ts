@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import type { GraphNode, SessionGraph } from "../src/model";
-import { COL_GAP, NODE_H, NODE_W, type Point } from "../web/layout";
+import { COL_GAP, layoutGraph, NODE_H, NODE_W, type GraphLayout, type Point } from "../web/layout";
 import {
+  bandAt,
+  chapterView,
   colorGroup,
   filterGraph,
   FIT_FLOOR,
@@ -10,6 +12,7 @@ import {
   inspectorSignature,
   isNodeVisible,
   revealView,
+  overviewView,
   stepSelection,
   summarizeGraph,
   transcriptHtml,
@@ -172,22 +175,37 @@ describe("Decision Graph view helpers", () => {
 describe("graph view framing", () => {
   const VW = 735;
   const VH = 722;
+  /** A one-line layout around hand-placed cards. */
+  function layoutOf(positions: Map<string, Point>): GraphLayout {
+    const pts = [...positions.values()];
+    return {
+      positions,
+      lines: new Map([...positions.keys()].map((id) => [id, 0])),
+      lineTops: [0],
+      bands: [],
+      bandOf: new Map(),
+      width: Math.max(0, ...pts.map((p) => p.x + NODE_W)),
+      height: Math.max(0, ...pts.map((p) => p.y + NODE_H)),
+    };
+  }
   /** Fifteen columns in one row plus one branch: far wider than the viewport, like a real session. */
-  const wide = new Map<string, Point>();
-  for (let i = 0; i < 15; i++) wide.set(`n${i}`, { x: i * (NODE_W + COL_GAP), y: 0 });
-  wide.set("branch", { x: 0, y: NODE_H + 42 });
+  const widePos = new Map<string, Point>();
+  for (let i = 0; i < 15; i++) widePos.set(`n${i}`, { x: i * (NODE_W + COL_GAP), y: 0 });
+  widePos.set("branch", { x: 0, y: NODE_H + 42 });
+  const wide = layoutOf(widePos);
 
   test("fitView fits a small graph whole, never enlarged past 100%", () => {
-    const small = new Map<string, Point>([
+    const smallPos = new Map<string, Point>([
       ["a", { x: 0, y: 0 }],
       ["b", { x: 600, y: 300 }],
     ]);
-    const v = fitView(small, 1000, 700);
+    const small = smallPos;
+    const v = fitView(layoutOf(smallPos), 1000, 700);
     expect(v.z).toBeGreaterThanOrEqual(FIT_FLOOR);
     expect(v.z).toBeLessThanOrEqual(1);
     for (const p of small.values()) expect(cardInside(v, p, 1000, 700)).toBe(true);
 
-    const cramped = fitView(small, 700, 500);
+    const cramped = fitView(layoutOf(smallPos), 700, 500);
     expect(cramped.z).toBeLessThan(1);
     expect(cramped.z).toBeGreaterThanOrEqual(FIT_FLOOR);
     for (const p of small.values()) expect(cardInside(cramped, p, 700, 500)).toBe(true);
@@ -197,31 +215,62 @@ describe("graph view framing", () => {
     for (const id of ["n0", "n7", "n14", "branch"]) {
       const v = fitView(wide, VW, VH, id);
       expect(v.z).toBe(FIT_FLOOR);
-      expect(cardInside(v, wide.get(id)!, VW, VH)).toBe(true);
+      expect(cardInside(v, widePos.get(id)!, VW, VH)).toBe(true);
     }
     // A selection in the middle of the row is centred in the viewport.
     const mid = fitView(wide, VW, VH, "n7");
-    expect(mid.tx + (wide.get("n7")!.x + NODE_W / 2) * mid.z).toBeCloseTo(VW / 2, 6);
+    expect(mid.tx + (widePos.get("n7")!.x + NODE_W / 2) * mid.z).toBeCloseTo(VW / 2, 6);
     // With no selection the view starts at the first card rather than in empty space.
-    expect(cardInside(fitView(wide, VW, VH), wide.get("n0")!, VW, VH)).toBe(true);
+    expect(cardInside(fitView(wide, VW, VH), widePos.get("n0")!, VW, VH)).toBe(true);
   });
 
   test("fitView at a fixed zoom (the 100% button) keeps the selected node inside the viewport", () => {
     for (const id of ["n0", "n7", "n14"]) {
       const v = fitView(wide, VW, VH, id, 1);
       expect(v.z).toBe(1);
-      expect(cardInside(v, wide.get(id)!, VW, VH)).toBe(true);
+      expect(cardInside(v, widePos.get(id)!, VW, VH)).toBe(true);
     }
-    expect(fitView(new Map(), VW, VH).z).toBe(1);
+    expect(fitView(layoutOf(new Map()), VW, VH).z).toBe(1);
   });
 
   test("revealView leaves a visible node alone and pans to a hidden one without changing the zoom", () => {
     const v = fitView(wide, VW, VH, "n0");
-    expect(revealView(v, wide.get("n0")!, VW, VH)).toBe(v);
+    expect(revealView(v, widePos.get("n0")!, VW, VH)).toBe(v);
 
-    const moved = revealView(v, wide.get("n14")!, VW, VH);
+    const moved = revealView(v, widePos.get("n14")!, VW, VH);
     expect(moved.z).toBe(v.z);
-    expect(cardInside(moved, wide.get("n14")!, VW, VH)).toBe(true);
+    expect(cardInside(moved, widePos.get("n14")!, VW, VH)).toBe(true);
+  });
+
+  test("chapterView puts the chapter's box at the top; bandAt then names that chapter", () => {
+    const mk = (id: string): GraphNode => node(id, "chosen", 1);
+    const ids = ["a", "b", "c", "d", "e", "f"];
+    const layout = layoutGraph(
+      ids.map(mk),
+      ids.slice(1).map((id, i) => ({ id: `e${i}`, from: ids[i]!, to: id, kind: "chosen" as const })),
+      [
+        { title: "One", nodeIds: ["a", "b"] },
+        { title: "Two", nodeIds: ["c", "d"] },
+        { title: "Three", nodeIds: ["e", "f"] },
+      ],
+      2,
+    );
+    for (let i = 0; i < 3; i++) {
+      const v = chapterView(layout, i, 1400, VH)!;
+      expect(v.z).toBeGreaterThanOrEqual(FIT_FLOOR);
+      expect(v.z).toBeLessThanOrEqual(1);
+      expect(v.ty + layout.bands[i]!.y * v.z).toBeGreaterThanOrEqual(0);
+      expect(v.ty + layout.bands[i]!.y * v.z).toBeLessThan(80);
+      expect(bandAt(layout, v)).toBe(i);
+    }
+    expect(chapterView(layout, 3, 1400, VH)).toBeUndefined();
+    expect(chapterView(layout, -1, 1400, VH)).toBeUndefined();
+
+    // "0": every chapter is inside the stage at once.
+    const all = overviewView(layout, 1400, VH);
+    expect(all.ty).toBeGreaterThanOrEqual(0);
+    expect(all.ty + layout.height * all.z).toBeLessThanOrEqual(VH);
+    expect(all.tx + layout.width * all.z).toBeLessThanOrEqual(1400);
   });
 });
 

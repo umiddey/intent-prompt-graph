@@ -215,6 +215,28 @@ html, body {
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
+/* Chapter heading above its outcomes; click jumps to the chapter. */
+.chapter-head {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  margin-top: 8px;
+  padding: 3px 5px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.chapter-head:first-child { margin-top: 0; }
+.chapter-head:hover { background: var(--hover); }
+.chapter-head i, .tl-chapter i {
+  flex: none;
+  font-style: normal;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--muted);
+}
+.chapter-head b { flex: 1; min-width: 0; font-size: 11.5px; font-weight: 700; color: var(--text); }
+.chapter-head span { display: none; }
+.chapter-head.on i, .chapter-head.on b { color: var(--accent); }
 .empty-note { font-size: 11.5px; color: var(--muted); margin: 0; }
 
 /*
@@ -298,6 +320,20 @@ html, body {
   flex-direction: column;
   gap: 10px;
 }
+.tl-chapter {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  margin-top: 18px;
+  padding: 4px 6px 6px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+.tl-chapter:first-child { margin-top: 0; }
+.tl-chapter i { font-size: 11px; }
+.tl-chapter b { font-size: 14px; font-weight: 700; }
+.tl-chapter span { margin-left: auto; font-size: 11px; color: var(--muted); }
+.tl-chapter:hover b { color: var(--accent); }
 .tl-step.branch { margin-left: 40px; }
 .tl-via {
   margin: 0 0 4px 15px;
@@ -404,10 +440,94 @@ html, body {
 /* Above every card, the selected one included, so a card never hides a label. */
 #labels { position: absolute; left: 0; top: 0; z-index: 6; pointer-events: none; }
 
+/* A chapter: a box behind its cards. The heading grows as the graph shrinks, so it stays readable zoomed out. */
+.band {
+  position: absolute;
+  left: 0;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--inset);
+  transition: top .35s ease, height .35s ease, width .35s ease;
+}
+.band-head {
+  position: absolute;
+  left: 22px;
+  top: 18px;
+  right: 22px;
+  display: flex;
+  align-items: baseline;
+  gap: .6em;
+  font-size: clamp(15px, calc(15px / var(--z, 1)), 56px);
+  line-height: 1.15;
+  white-space: nowrap;
+  overflow: hidden;
+  cursor: pointer;
+}
+.band-head i { font-style: normal; font-weight: 700; color: var(--muted); }
+.band-head b { font-weight: 700; color: var(--text); overflow: hidden; text-overflow: ellipsis; }
+.band-head span { font-size: .75em; color: var(--muted); }
+.band-head:hover b, .band-head.on i { color: var(--accent); }
+#world.far .band-head span,
+#world.far .node-desc,
+#world.far .edge-label { visibility: hidden; }
+
+/* Mini-map: every chapter as a strip, every card as a dot, and a frame for what the stage shows. */
+#minimap {
+  position: absolute;
+  right: 14px;
+  top: 14px;
+  z-index: 7;
+  padding: 8px;
+  border-radius: 9px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  box-shadow: var(--float-shadow);
+  overflow: hidden;
+}
+#minimap.boxed { padding-left: 24px; }
+#mini-bands { position: relative; }
+.mini-band {
+  position: absolute;
+  left: 0;
+  right: 0;
+  border-radius: 3px;
+  cursor: pointer;
+}
+#minimap.boxed .mini-band { background: var(--inset); outline: 1px solid var(--border); }
+.mini-band:hover { outline-color: var(--border-hi); }
+.mini-band em {
+  position: absolute;
+  left: -18px;
+  top: 0;
+  width: 14px;
+  text-align: right;
+  font-style: normal;
+  font-size: 9.5px;
+  font-weight: 700;
+  line-height: 1.2;
+  color: var(--muted);
+}
+#mini-frame { position: relative; }
+#minimap:not(.boxed) .mini-band em { display: none; }
+.mini-band.on em { color: var(--accent); }
+#minimap.boxed .mini-band.on { outline-color: var(--accent); }
+.mini-dot { position: absolute; border-radius: 1.5px; background: var(--accent); pointer-events: none; }
+.mini-dot.grp-other { background: var(--muted); }
+.mini-dot.grp-rejected { background: var(--rejected); }
+.mini-dot.selected { outline: 1.5px solid var(--sel); outline-offset: 1px; }
+#mini-view {
+  position: absolute;
+  border: 1.5px solid var(--sel);
+  border-radius: 3px;
+  pointer-events: none;
+}
+
 /* An edge takes the group colour of the node it leads to, and is dashed into a rejected or unchosen one. */
 .edge { fill: none; stroke: var(--accent); stroke-width: 1.6; }
 .edge.grp-other { stroke: var(--muted); }
 .edge.grp-rejected { stroke-dasharray: 5 5; }
+/* An edge that carries on to the next line or the next chapter. */
+.edge.wrap { stroke-dasharray: 2 5; stroke-linecap: round; }
 
 .edge-label {
   position: absolute;
